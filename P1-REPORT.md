@@ -184,6 +184,14 @@ chunk checkpoint 覆盖窗口锚点与对齐结果，但 canonical 全文 ASR �
 位于 **JSON 顶层**，不在 `result` 内；`result` 只含 `items`/`coverage`/`warnings`。
 `transcribe` 的语言字段仍在 `result` 内。两者 schema 均向后兼容。
 
+### 4.15 配置文件未知 key 的容忍策略
+
+配置加载器忽略当前版本不认识的顶层 key（不再让每个命令以 rc2 失败），
+`config set` 以原始 JSON 对象回写、保留这些未知 key，只校验本次写入的 key
+与值。这样手写/新版本配置不会把旧版本命令全部卡死；未知 key 不参与合并，
+也不会出现在 `config show` 的有效配置里。`config set --project` 在写入前
+检查目标文件及现有父目录（至少 `.qasr`）是否为符号链接或解析到项目根之外。
+
 ## 6. 审查入口
 
 - 假 OpenAI 服务与 serve/doctor 契约测试：`tests/contract/test_serve_doctor.py`
@@ -192,5 +200,5 @@ chunk checkpoint 覆盖窗口锚点与对齐结果，但 canonical 全文 ASR �
 - 长音频：`tests/unit/test_long_audio.py`、`tests/unit/test_long_transcribe.py`
 - 批量/tsv/md/stdin-list：`tests/contract/test_p1_batch_contract.py`
 - jobs/bench/config/models：`tests/contract/test_p1_ops_contract.py`
-- 完整 schema：`schemas/bench.json`、`schemas/jobs-list.json`、`schemas/jobs-show.json`、`schemas/models-show.json`
+- 完整 schema：`schemas/bench.json`、`schemas/jobs-list.json`、`schemas/jobs-show.json`、`schemas/models-show.json`、`schemas/config-get.json`、`schemas/config-set.json`
 - 全量：`uv run pytest -q`；GPU：`RUN_INTEGRATION=1 ... pytest -m integration`
