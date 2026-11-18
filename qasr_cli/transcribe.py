@@ -560,11 +560,12 @@ def _run_locked(
         payload = batch_payload([], spec_errors, total=1)
 
     # ---- exit code ------------------------------------------------------
-    ok_count = sum(1 for spec in specs if spec.error is None)
+    ok_count = sum(1 for spec in specs if spec.error is None and not spec.skipped)
+    completed_count = ok_count + skipped_count
     failed_count = len(failures)
     if failed_count == 0:
         exit_code = EXIT_OK
-    elif ok_count > 0:
+    elif completed_count > 0:
         exit_code = EXIT_PARTIAL
     else:
         exit_code = _first_error_code(specs, spec_errors)

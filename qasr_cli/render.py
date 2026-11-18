@@ -101,7 +101,7 @@ def batch_payload(
     total: int,
     skipped: int = 0,
 ) -> Dict[str, Any]:
-    ok_count = sum(1 for item in items if item.get("ok"))
+    ok_count = sum(1 for item in items if item.get("ok") and not item.get("skipped"))
     return {
         "schema_version": SCHEMA_VERSION,
         "ok": len(errors) == 0,

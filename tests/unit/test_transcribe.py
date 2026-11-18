@@ -174,6 +174,27 @@ def test_resume_skips_unchanged(monkeypatch, tmp_path, model_dir):
     assert payload.get("skipped") is True
 
 
+def test_resume_batch_summary_excludes_skipped_from_ok(monkeypatch, tmp_path, model_dir):
+    a = write_wav(tmp_path / "a.wav")
+    b = write_wav(tmp_path / "b.wav", freq=880.0)
+    out = tmp_path / "out"
+    backend = FakeBackend()
+    _patch_backend(monkeypatch, backend)
+    specs = [_spec(a), _spec(b)]
+    core.run(_settings(model_dir, stdout_mode="none", out_dir=out, formats=["txt"]), specs)
+    assert backend.calls == 2
+
+    result = core.run(
+        _settings(model_dir, stdout_mode="json", out_dir=out, formats=["txt"], resume=True),
+        [_spec(a), _spec(b)],
+    )
+    assert result.exit_code == EXIT_OK
+    assert backend.calls == 2
+    payload = json.loads(result.stdout)
+    assert payload["summary"] == {"total": 2, "ok": 0, "failed": 0, "skipped": 2}
+    assert result.summary == {"total": 2, "ok": 0, "failed": 0, "skipped": 2}
+
+
 def test_resume_reruns_when_outputs_deleted(monkeypatch, tmp_path, model_dir):
     wav = write_wav(tmp_path / "a.wav")
     out = tmp_path / "out"
