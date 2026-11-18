@@ -55,8 +55,10 @@ uv pip install -e ".[local,dev]"
 ```
 /Users/walter/workspace/QwenLM/Qwen3-ASR/models/Qwen3-ASR-0.6B          # 完整
 /Users/walter/workspace/QwenLM/Qwen3-ASR/models/Qwen3-ForcedAligner-0.6B # 完整
-/Users/walter/workspace/QwenLM/Qwen3-ASR/models/Qwen3-ASR-1.7B          # 半包！用于验证 models verify
+/Users/walter/workspace/QwenLM/Qwen3-ASR/models/Qwen3-ASR-1.7B          # 完整
 ```
+
+> **2026-11-18 fixture 更正**：1.7B 已完成下载（两个 shard 头可解析、大小与 header 一致，safetensors 可打开全部 key，无 `.aria2`）。半包场景改为 pytest `tmp_path` 合成 fixture（截断 shard 或 `.aria2` 标记），不要依赖真实 1.7B 报 `incomplete`。
 
 集成测试用 `QASR_TEST_MODEL_DIR` 指向上面目录；不要提交模型或音频。
 
@@ -133,7 +135,7 @@ README.md
 
 **M1 验收**
 - 无 torch 环境：`qasr --help`、`qasr --version`、`qasr languages --json`、`qasr config show --json`、`qasr models verify 1.7b --json` 均通过。
-- `models verify 1.7b` 正确报 `incomplete`；`0.6b` 报 `complete`。
+- 半包合成 fixture 报 `incomplete`（含 `pull --resume` 提示）；真实 `0.6b`/`1.7b` 报 `complete`。
 - `doctor --json` 通过 schema。
 
 ---
@@ -239,7 +241,7 @@ README.md
 **M4 验收**
 - 干净环境安装成功；`qasr doctor` 全绿。
 - `qasr transcribe ./samples --recursive --format txt,json,srt --out-dir out --resume` 可重复执行；kill -9 后续跑只处理未完成项。
-- `qasr models verify 1.7b` 正确拦截半包。
+- `qasr models verify` 正确拦截合成的半包 fixture（真实 1.7B 已完整，断言 `complete`）。
 
 ---
 
@@ -285,7 +287,7 @@ README.md
 | 单元 | 参数解析、三张语言表、配置优先级、模型别名/verify、输入展开/路径安全、cue 切分/舍入、job key/resume、JSON 渲染 |
 | 契约 | 所有 schema 快照、错误→退出码、stdout 纯净性、`--help` 不 import torch |
 | 模拟 | `FakeBackend` 注入固定文本/时间戳；坏文件隔离；崩溃注入 resume |
-| 集成 | 0.6B 短音频 text/json/srt；align 13 items；1.7B verify 半包；`RUN_INTEGRATION=1` 才跑 |
+| 集成 | 0.6B 短音频 text/json/srt；align 13 items；合成半包 verify；`RUN_INTEGRATION=1` 才跑 |
 
 音频 fixture：单元测试用代码生成的 1s 静音/正弦 WAV；集成测试用 `/tmp/qasr_asr_zh.wav`（若存在）或 `QASR_TEST_AUDIO`。
 
