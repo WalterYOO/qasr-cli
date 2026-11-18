@@ -119,8 +119,9 @@ qasr [--backend vllm] stream --input a.wav --language zh --context "..." --emit 
 - 人类 `text` 模式：TTY 用 `\r` 覆盖当前行、结束换行；非 TTY 只在最终快照
   打印一次文本。`--emit text` 时不允许同时 `--json`（`--json` 只影响 envelope，
   与 jsonl 流冲突 → 2）。
-- 超过 `--max-stream-seconds`：停止读源、flush 尾包、发最终快照，然后以 5
-  退出，error.kind=`quality`，message 明确是运行上限而非识别质量。
+- 超过 `--max-stream-seconds`：停止读源，以 5 退出，error.kind=`quality`，
+  message 明确是运行上限而非识别质量。输出形态按 §7 Q1：只发一条
+  `ok:false,is_final:true` 的错误快照（不额外发 `ok:true` 最终快照）。
 
 ### S4 资源与安全
 
