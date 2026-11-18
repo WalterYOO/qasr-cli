@@ -37,6 +37,7 @@ class _Handler(BaseHTTPRequestHandler):
     chat_text = "language Chinese<asr_text>chat hello"
     delay = 0.0
     fail_filename = None
+    error_body = None
     redirect_to = None
     language_400 = False
     requests = []
@@ -100,7 +101,8 @@ class _Handler(BaseHTTPRequestHandler):
                 else cls.transcription_status
             )
             if status != 200:
-                self._send(status, {"error": f"status {status}"})
+                message = cls.error_body or f"status {status}"
+                self._send(status, {"error": message})
                 return
             if cls.fail_filename and f'filename="{cls.fail_filename}"'.encode() in body:
                 self._send(400, {"error": "bad audio"})
@@ -534,3 +536,41 @@ def test_remote_cross_origin_redirect_is_refused_without_leaking_token(
     assert "redirect" in _payload(out)["error"]["message"]
     assert [path for method, path in handler_b.requests if method == "POST"] == []
     assert all("Authorization" not in headers for headers in handler_b.headers)
+
+
+def test_remote_error_body_never_leaks_token_to_stdout_stderr_or_state(
+    capsys, tmp_path, monkeypatch
+):
+    secret = "SENTINEL_TOKEN_123"
+    monkeypatch.setenv("QASR_SERVE_TOKEN", secret)
+    wav = write_wav(tmp_path / "a.wav", seconds=0.2)
+    out_dir = tmp_path / "out"
+    with fake_server(
+        transcription_status=500,
+        error_body=f"upstream failed; token={secret} Authorization: Bearer {secret}",
+    ) as (url, _handler):
+        code, out = _run(
+            capsys,
+            ["--server", url, "transcribe", str(wav), "--retries", "0",
+             "--out-dir", str(out_dir), "--json"],
+        )
+    assert code == 3
+    state = (out_dir / ".qasr" / "state.jsonl").read_text(encoding="utf-8")
+    combined = out.out + out.err + state
+    assert secret not in combined
+    assert "***" in combined
+
+
+def test_sanitize_text_covers_token_header_userinfo_and_query(monkeypatch):
+    from qasr_cli.remote import sanitize_text
+
+    secret = "SENTINEL_TOKEN_123"
+    monkeypatch.setenv("QASR_SERVE_TOKEN", secret)
+    userinfo = "user:" + secret + "@127.0.0.1:18000"
+    raw = (
+        f"token {secret}; Authorization: Bearer {secret}; "
+        f"http://{userinfo}/v1/audio/transcriptions?token={secret}&key={secret}"
+    )
+    cleaned = sanitize_text(raw)
+    assert secret not in cleaned
+    assert cleaned.count("***") >= 5

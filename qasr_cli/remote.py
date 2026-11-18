@@ -175,7 +175,7 @@ def probe_server(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> Dict[str, Any
             except (ValueError, UnicodeDecodeError):
                 result["error"] = "response was not valid JSON"
     except urllib.error.HTTPError as exc:
-        reason = str(exc.reason or "").strip()
+        reason = sanitize_text(exc.reason or "").strip()
         detail = f"HTTP {exc.code}" + (f": {reason}" if reason else "")
         result.update(
             reachable=True,
@@ -185,7 +185,7 @@ def probe_server(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> Dict[str, Any
             error=detail,
         )
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        reason = getattr(exc, "reason", exc)
+        reason = sanitize_text(getattr(exc, "reason", exc))
         timed_out = isinstance(exc, TimeoutError) or "timed out" in str(reason).casefold()
         result.update(
             latency_ms=int((time.perf_counter() - started) * 1000),
@@ -305,9 +305,26 @@ def _retry_after(headers: Any) -> Optional[float]:
     return value if 0 <= value <= 10 else None
 
 
+def sanitize_text(text: Any, *, token: Optional[str] = None) -> str:
+    """Remove credentials before a body/reason reaches logs, JSON or state."""
+    value = str(text or "")
+    secret = token or serve_token()
+    if secret:
+        value = value.replace(secret, "***")
+    value = re.sub(r"(?i)(authorization\s*:\s*bearer\s+)\S+", r"\1***", value)
+    value = re.sub(r"(?i)\bbearer\s+\S+", "Bearer ***", value)
+    value = re.sub(r"(https?://)[^/\s@]+@", r"\1***@", value)
+    value = re.sub(
+        r"(?i)([?&](?:token|key|secret|password|passwd|apikey|api_key)=)[^&\s\"']+",
+        r"\1***",
+        value,
+    )
+    return value
+
+
 def _body_snippet(raw: bytes, limit: int = ERROR_BODY_LIMIT) -> str:
-    text = raw[:limit].decode("utf-8", errors="replace")
-    text = re.sub(r"\s+", " ", text).strip()
+    text = raw[: limit * 4].decode("utf-8", errors="replace")
+    text = re.sub(r"\s+", " ", sanitize_text(text)).strip()
     return text[:limit]
 
 
@@ -417,7 +434,7 @@ class RemoteBackend:
                         None, _body_snippet(raw), reason="response was not valid JSON"
                     ) from None
             except urllib.error.HTTPError as exc:
-                body = _body_snippet(exc.read() or b"")
+                body = _body_snippet(exc.read(ERROR_BODY_LIMIT * 4) or b"")
                 status = int(exc.code)
                 retryable = status in (408, 429) or 500 <= status <= 599
                 retry_after = _retry_after(exc.headers)
@@ -429,7 +446,7 @@ class RemoteBackend:
                     status, body, retryable=retryable, retry_after=retry_after
                 ) from None
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                reason = getattr(exc, "reason", exc)
+                reason = sanitize_text(getattr(exc, "reason", exc))
                 if attempt < self.retries:
                     self._sleep(attempt, None)
                     attempt += 1
