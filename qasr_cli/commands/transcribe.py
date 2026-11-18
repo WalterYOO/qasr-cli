@@ -367,8 +367,15 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     if not ctx.dry_run and needs_runtime and not is_remote:
         require_local(model, action="transcribe")
     if is_remote:
-        model_id = model.repo or str(model.value)
-        model_path = model.path or Path(model_id)
+        # Without an explicit --model the server's /v1/models list is
+        # authoritative; asking for the local default alias would 404 on
+        # servers that only expose a served-model-name.
+        if cfg.source_of("model") == "default":
+            model_id = ""
+            model_path = Path(".")
+        else:
+            model_id = model.repo or str(model.value)
+            model_path = model.path or Path(model_id)
     else:
         model_path = model.path or Path(str(model.value))
         model_id = model.repo or model.alias or str(model_path)
@@ -390,9 +397,13 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     if backend_fallback:
         ctx.warn("vLLM is not importable on this CUDA host; falling back to transformers")
 
-    device, dtype = resolve_device_dtype(
-        cfg, optional=ctx.dry_run or not needs_runtime or is_remote
-    )
+    if is_remote:
+        # The remote backend never imports torch: device/dtype are irrelevant.
+        device, dtype = "remote", "fp32"
+    else:
+        device, dtype = resolve_device_dtype(
+            cfg, optional=ctx.dry_run or not needs_runtime
+        )
 
     model_fingerprint = None
     aligner_fingerprint = None

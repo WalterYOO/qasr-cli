@@ -442,7 +442,7 @@ def test_remote_fail_fast_leaves_no_running(capsys, tmp_path):
             ["--server", url, "transcribe", str(bad), str(good), "--out-dir",
              str(out_dir), "--jobs", "2", "--fail-fast", "--json"],
         )
-    assert code == 6  # one failure + one completed/skipped item
+    assert code == 4  # first error: 400 bad audio (input)
     records = [
         json.loads(line)
         for line in (out_dir / ".qasr" / "state.jsonl").read_text(
@@ -574,3 +574,33 @@ def test_sanitize_text_covers_token_header_userinfo_and_query(monkeypatch):
     cleaned = sanitize_text(raw)
     assert secret not in cleaned
     assert cleaned.count("***") >= 5
+
+
+def test_remote_default_model_uses_first_served_model(capsys, wav_file):
+    with fake_server(served_models=["alpha-asr", "beta-asr"]) as (url, handler):
+        code, out = _run(capsys, ["--server", url, "transcribe", str(wav_file), "--json"])
+    assert code == 0, out.err
+    body = handler.bodies[0]
+    assert b"alpha-asr" in body
+    assert b"Qwen/Qwen3-ASR" not in body
+    assert any("using 'alpha-asr'" in warning
+               for warning in _payload(out)["result"]["warnings"])
+
+
+def test_remote_backend_does_not_import_torch(capsys, wav_file, monkeypatch):
+    import importlib.abc
+    import sys
+
+    class _BlockTorch(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname == "torch" or fullname.startswith("torch."):
+                raise AssertionError("remote backend imported torch")
+            return None
+
+    for name in list(sys.modules):
+        if name == "torch" or name.startswith("torch."):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_BlockTorch(), *sys.meta_path])
+    with fake_server() as (url, _handler):
+        code, out = _run(capsys, ["--server", url, "transcribe", str(wav_file), "--json"])
+    assert code == 0, out.err

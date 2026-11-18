@@ -397,6 +397,10 @@ class RemoteBackend:
         except _HTTPFailure as failure:
             raise _public_error(failure) from None
 
+    @property
+    def resolved_model_id(self) -> Optional[str]:
+        return self._model_id
+
     # -- transport -------------------------------------------------------
     def _warn(self, message: str) -> None:
         if self.log is not None:
@@ -590,6 +594,10 @@ class RemoteBackend:
         language = iso_for(job.language) if job.language else None
         warnings: List[str] = list(self.notes)
         used_chat = bool(job.context) or self.base_url in _CHAT_ONLY_SERVERS
+        if job.context is None and self.base_url in _CHAT_ONLY_SERVERS:
+            cached = "transcription endpoint unavailable; used chat completions"
+            warnings.append(cached)
+            self._warn(f"{cached} (cached)")
         try:
             if job.context:
                 payload = self._chat(raw_audio, mime, job.context, language)
@@ -602,18 +610,18 @@ class RemoteBackend:
                     if failure.status in (404, 405):
                         _CHAT_ONLY_SERVERS.add(self.base_url)
                         used_chat = True
-                        warnings.append(
-                            "transcription endpoint unavailable; used chat completions"
-                        )
+                        cached = "transcription endpoint unavailable; used chat completions"
+                        warnings.append(cached)
+                        self._warn(cached)
                         payload = self._chat(raw_audio, mime, "", language)
                     elif (
                         failure.status == 400
                         and language is not None
                         and _LANGUAGE_ERROR.search(failure.body)
                     ):
-                        warnings.append(
-                            "server rejected the language; retried without it"
-                        )
+                        message = "server rejected the language; retried without it"
+                        warnings.append(message)
+                        self._warn(message)
                         payload = self._transcriptions(raw_audio, filename, mime, None)
                     else:
                         raise
@@ -638,9 +646,14 @@ class RemoteBackend:
         parsed_language, text = parse_asr_output(raw_text)
         if used_chat and language is not None:
             warnings.append("language_not_enforced_on_chat")
+            self._warn("chat completions do not enforce --language")
         parsed_iso = iso_for(parsed_language) if parsed_language is not None else None
         if language is not None and parsed_iso is not None and parsed_iso != language:
             warnings.append("server_ignored_language")
+            self._warn(
+                f"requested language {language!r} but the server answered "
+                f"{parsed_language!r}"
+            )
 
         return TranscribeResult(
             text=text,

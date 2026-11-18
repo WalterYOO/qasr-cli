@@ -477,6 +477,9 @@ def _run_locked(
             prepare = getattr(backend, "prepare", None)
             if callable(prepare):
                 prepare()
+            resolved = getattr(backend, "resolved_model_id", None)
+            if resolved and not settings.model_id:
+                settings.model_id = str(resolved)
             load_ms = int((time.perf_counter() - started) * 1000)
             log(f"remote backend ready ({load_ms} ms)")
         else:
@@ -706,6 +709,10 @@ def _run_locked(
     failed_count = len(failures)
     if failed_count == 0:
         exit_code = EXIT_OK
+    elif settings.fail_fast:
+        # Fail-fast aborts on the first failure: report that error's code, not
+        # the aggregate partial-failure code (unattempted items are skipped).
+        exit_code = _first_error_code(specs, spec_errors)
     elif completed_count > 0:
         exit_code = EXIT_PARTIAL
     else:

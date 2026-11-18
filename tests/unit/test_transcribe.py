@@ -5,7 +5,7 @@ import pytest
 
 from qasr_cli import transcribe as core
 from qasr_cli.backends import Segment, TranscribeResult
-from qasr_cli.errors import EXIT_INPUT, EXIT_OK, EXIT_PARTIAL
+from qasr_cli.errors import EXIT_INPUT, EXIT_MODEL, EXIT_OK, EXIT_PARTIAL
 from qasr_cli.inputs import InputItem
 from tests.conftest import write_wav
 
@@ -274,7 +274,7 @@ def test_fail_fast_leaves_no_running_items(monkeypatch, tmp_path, model_dir):
         [_spec(a), _spec(b), _spec(c)],
     )
     payload = json.loads(result.stdout)
-    assert result.exit_code == EXIT_PARTIAL
+    assert result.exit_code == EXIT_MODEL
     assert payload["summary"] == {"total": 3, "ok": 1, "failed": 1, "skipped": 1}
     assert result.summary == payload["summary"]
 
