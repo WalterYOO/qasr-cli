@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/models-verify.json",
+  "title": "qasr models verify",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "status", "checks"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"const": "models"},
+    "action": {"const": "verify"},
+    "alias": {"type": ["string", "null"]},
+    "repo": {"type": ["string", "null"]},
+    "path": {"type": ["string", "null"]},
+    "status": {"enum": ["complete", "incomplete", "missing"]},
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "status", "detail"],
+        "properties": {
+          "name": {"type": "string"},
+          "status": {"enum": ["ok", "warn", "fail"]},
+          "detail": {"type": "string"},
+          "value": {}
+        }
+      }
+    },
+    "fingerprint": {"type": ["string", "null"]},
+    "size_bytes": {"type": ["integer", "null"]},
+    "hint": {"type": "string"}
+  },
+  "additionalProperties": true
+}

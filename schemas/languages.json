@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/languages.json",
+  "title": "qasr languages",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "forceable", "lid_labels", "alignable", "dialects"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"const": true},
+    "command": {"const": "languages"},
+    "forceable": {
+      "type": "array",
+      "minItems": 30,
+      "items": {
+        "type": "object",
+        "required": ["name", "iso", "aliases"],
+        "properties": {
+          "name": {"type": "string"},
+          "iso": {"type": "string"},
+          "aliases": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "lid_labels": {"type": "array", "items": {"type": "string"}},
+    "alignable": {"type": "array", "minItems": 11, "items": {"type": "string"}},
+    "dialects": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

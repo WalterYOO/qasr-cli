@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/align.json",
+  "title": "qasr align result",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "input", "language", "result", "metrics"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"const": "align"},
+    "input": {
+      "type": "object",
+      "required": ["source", "duration_s"],
+      "properties": {
+        "source": {"type": "string"},
+        "duration_s": {"type": "number"}
+      }
+    },
+    "language": {"type": "string"},
+    "result": {
+      "type": "object",
+      "required": ["items", "coverage", "warnings"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["text", "start", "end"],
+            "properties": {
+              "text": {"type": "string"},
+              "start": {"type": "number"},
+              "end": {"type": "number"}
+            }
+          }
+        },
+        "coverage": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "warnings": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "load_ms": {"type": "integer"},
+        "infer_ms": {"type": "integer"}
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["format", "path", "sha256"],
+        "properties": {
+          "format": {"type": "string"},
+          "path": {"type": "string"},
+          "sha256": {"type": "string"}
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

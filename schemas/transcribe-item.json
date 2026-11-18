@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/transcribe-item.json",
+  "title": "qasr transcribe single item",
+  "type": "object",
+  "required": ["schema_version", "ok", "command"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"const": "transcribe"},
+    "skipped": {"type": "boolean"},
+    "input": {
+      "type": "object",
+      "required": ["id", "source"],
+      "properties": {
+        "id": {"type": "string"},
+        "source": {"type": "string"},
+        "duration_s": {"type": ["number", "null"]},
+        "sha256": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "model": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "backend": {"type": "string"},
+        "device": {"type": "string"},
+        "dtype": {"type": "string"},
+        "fingerprint": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "result": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": {"type": ["string", "null"]},
+        "language": {"type": ["string", "null"]},
+        "language_source": {"enum": ["auto", "forced"]},
+        "segments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["text", "start", "end", "kind"],
+            "properties": {
+              "text": {"type": "string"},
+              "start": {"type": "number"},
+              "end": {"type": "number"},
+              "kind": {"enum": ["sentence", "word", "char"]}
+            }
+          }
+        },
+        "timestamp_source": {"type": ["string", "null"]},
+        "text_transform": {"type": "string"},
+        "warnings": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": true
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "load_ms": {"type": "integer"},
+        "infer_ms": {"type": "integer"},
+        "wall_ms": {"type": "integer"},
+        "rtf": {"type": ["number", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["format", "path", "sha256"],
+        "properties": {
+          "format": {"type": "string"},
+          "path": {"type": "string"},
+          "sha256": {"type": "string"}
+        }
+      }
+    },
+    "error": {"type": "object"}
+  },
+  "additionalProperties": true
+}

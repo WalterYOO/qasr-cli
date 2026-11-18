@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/models-pull.json",
+  "title": "qasr models pull",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "alias", "path", "status"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"const": "models"},
+    "action": {"const": "pull"},
+    "alias": {"type": "string"},
+    "repo": {"type": "string"},
+    "path": {"type": "string"},
+    "source": {"type": "string"},
+    "revision": {"type": ["string", "null"]},
+    "status": {"enum": ["complete", "incomplete", "missing"]},
+    "checks": {"type": "array", "items": {"type": "object"}},
+    "hint": {"type": ["string", "null"]}
+  },
+  "additionalProperties": true
+}

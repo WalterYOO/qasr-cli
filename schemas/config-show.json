@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/config-show.json",
+  "title": "qasr config show",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "home", "files", "config"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"const": true},
+    "command": {"const": "config"},
+    "action": {"const": "show"},
+    "home": {"type": "string"},
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "exists"],
+        "properties": {
+          "path": {"type": "string"},
+          "exists": {"type": "boolean"},
+          "layer": {"type": "string"}
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["value", "source"],
+        "properties": {
+          "value": {},
+          "source": {"type": "string"}
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

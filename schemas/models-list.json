@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/models-list.json",
+  "title": "qasr models list",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "models"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"const": true},
+    "command": {"const": "models"},
+    "action": {"const": "list"},
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["alias", "repo", "present", "status"],
+        "properties": {
+          "alias": {"type": "string"},
+          "repo": {"type": "string"},
+          "path": {"type": ["string", "null"]},
+          "present": {"type": "boolean"},
+          "status": {"enum": ["complete", "incomplete", "missing"]},
+          "size_bytes": {"type": ["integer", "null"]},
+          "fingerprint": {"type": ["string", "null"]},
+          "capabilities": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

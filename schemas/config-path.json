@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/config-path.json",
+  "title": "qasr config path",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "path", "exists"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"const": true},
+    "command": {"const": "config"},
+    "action": {"const": "path"},
+    "path": {"type": "string"},
+    "exists": {"type": "boolean"},
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "exists"],
+        "properties": {
+          "path": {"type": "string"},
+          "exists": {"type": "boolean"}
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

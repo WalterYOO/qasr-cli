@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/transcribe-batch.json",
+  "title": "qasr transcribe batch envelope",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "summary", "items", "errors"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"const": "transcribe"},
+    "summary": {
+      "type": "object",
+      "required": ["total", "ok", "failed", "skipped"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "ok": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "skipped": {"type": "integer", "minimum": 0}
+      }
+    },
+    "items": {"type": "array", "items": {"type": "object"}},
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "error"],
+        "properties": {
+          "id": {"type": ["string", "null"]},
+          "source": {"type": ["string", "null"]},
+          "error": {"type": "object"}
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

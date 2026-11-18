@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/doctor.json",
+  "title": "qasr doctor",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "status", "checks"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"const": "doctor"},
+    "status": {"enum": ["ok", "warn", "fail"]},
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "status", "detail"],
+        "properties": {
+          "name": {"type": "string"},
+          "status": {"enum": ["ok", "warn", "fail"]},
+          "value": {},
+          "detail": {"type": "string"},
+          "hint": {"type": "string"}
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

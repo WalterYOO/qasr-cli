@@ -1,0 +1,30 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# Models / audio / outputs
+models/
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.ogg
+*.opus
+*.webm
+*.mp4
+out/
+qasr-out/
+
+# OS
+.DS_Store

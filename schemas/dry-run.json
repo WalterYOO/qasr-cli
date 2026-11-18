@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/dry-run.json",
+  "title": "qasr dry-run plan",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "plan"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"enum": ["transcribe", "align"]},
+    "plan": {
+      "type": "object",
+      "properties": {
+        "inputs": {"type": "array", "items": {"type": "object"}},
+        "input": {"type": "object"},
+        "model": {"type": "object"},
+        "aligner": {"type": ["object", "null"]},
+        "backend": {"type": "string"},
+        "device": {"type": "string"},
+        "dtype": {"type": "string"},
+        "language": {"type": "string"},
+        "timestamps": {"type": "boolean"},
+        "formats": {"type": "array", "items": {"type": "string"}},
+        "granularity": {"type": "string"},
+        "coverage_min": {"type": "number"},
+        "max_new_tokens": {"type": "integer"},
+        "outputs": {"type": "array", "items": {"type": "object"}},
+        "errors": {"type": "array", "items": {"type": "object"}}
+      },
+      "additionalProperties": true
+    },
+    "errors": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": true
+}
