@@ -240,7 +240,7 @@ tests/
 ### N5 — 高级批量、运维与完整验收
 
 **T5.1 输入与重跑**
-- `--stdin-list`：**无参数**，从 stdin 读路径，每行一个；空行跳过；`-` 不再是路径；与 `--manifest` 互斥；与位置参数可并存（stdin 在前/位置参数在后，稳定排序去重）。需要从文件读时用 shell 重定向 `< paths.txt`。
+- `--stdin-list`：**无参数**，从 stdin 读路径，每行一个；空行跳过；`-` 不再是路径；与 `--manifest` 互斥；与位置参数可并存（stdin 在前/位置参数在后，稳定排序去重）。需要从文件读时用 shell 重定向 `< paths.txt`。**2026-11-18 定稿**：`-` 既不是 stdin 标记也不是合法输入路径，出现在 stdin-list 或位置参数中 → 退出 2，hint 指向 `--stdin-list`/管道。
 - `--skip-existing`：目标输出全部存在且非空 → `skipped`，不加载模型；与 `--resume` 可同用（先 skip-existing 再 job_key 判定）；JSON 计数不并入 ok（沿用 P0 修正）。
 - `--retry`：对 `error.retryable == true` 的失败项重跑一次；仅一次，记录 `attempts`；与 `--fail-fast` 互斥（用法错误）。
 - `--continue-on-error` 默认不变；部分失败退出 6。
@@ -272,7 +272,7 @@ tests/
 
 **T5.6 `config get/set`**
 - `config get KEY [--json]`：输出合并后的有效值（含来源可选择）；未知 key → 退出 2。
-- `config set KEY VALUE [--project|--home] [--json]`：默认写 `QASR_HOME/config.json`；`--project` 从 cwd 向上找最近的 `.git`/`pyproject.toml` 目录作为项目根（找不到则 cwd），写 `<root>/.qasr/config.json`（不存在则创建）；原子写、保留未知键、枚举校验（device/dtype/backend/offline）。目标文件是 symlink → 退出 2，不写。
+- `config set KEY VALUE [--project|--home] [--json]`：默认写 `QASR_HOME/config.json`；`--project` 从 cwd 向上找最近的 `.git`/`pyproject.toml` 目录作为项目根（找不到则 cwd），写 `<root>/.qasr/config.json`（不存在则创建）；原子写、保留未知键、枚举校验（device/dtype/backend/offline）。目标文件是 symlink → 退出 2，不写。**2026-11-18 定稿**：已有配置中的未知顶层键不阻止读取/写入，写回时原样保留；但新增/修改的 key 仍必须是已知键。目标及其已存在父目录（含 `.qasr`）为 symlink 或解析越界 → 退出 2。
 - 拒绝设置 `QASR_SERVE_TOKEN`/任何 token 类键（本就不是配置键）；`server` 可设置。
 - `config show` 增加新键 `server`、`timeout`、`retries`、`window_seconds`、`window_overlap`、`max_chunk_seconds` 的来源展示。
 
