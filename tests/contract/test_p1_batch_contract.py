@@ -10,6 +10,7 @@ import pytest
 from qasr_cli import transcribe as core
 from qasr_cli.backends import Segment, TranscribeResult
 from qasr_cli.cli import main
+from qasr_cli.config import qasr_home
 from qasr_cli.render import render_format
 from tests.conftest import write_wav
 
@@ -196,6 +197,18 @@ def test_dash_is_rejected_in_stdin_list(
     payload = json.loads(capsys.readouterr().out)
     assert code == 2
     assert "--stdin-list" in payload["error"]["hint"]
+
+
+def test_usage_error_does_not_register_job(capsys, tmp_path, model_dir):
+    wav = write_wav(tmp_path / "a.wav")
+    code = main([
+        "transcribe", str(wav), "--device", "cpu", "--dtype", "fp32",
+        "-o", str(tmp_path / "out"), "--format", "json", "--json",
+    ])
+    capsys.readouterr()
+    assert code == 2
+    jobs_root = qasr_home() / "jobs"
+    assert not jobs_root.exists() or not list(jobs_root.iterdir())
 
 
 def test_skip_existing_does_not_resolve_or_load_model(

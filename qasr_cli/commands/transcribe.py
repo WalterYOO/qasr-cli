@@ -218,15 +218,6 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                          hint="there are no target paths to check otherwise")
     if getattr(ns, "retry_failed", False) and getattr(ns, "fail_fast", False):
         raise UsageError("--retry cannot be combined with --fail-fast")
-    job_id = None
-    if out_dir is not None and not ctx.dry_run:
-        ensure_output_unlocked(out_dir)
-        from ..jobs import register_job
-
-        job_id = register_job(
-            out_dir, command="transcribe", total=len(specs) + len(spec_errors)
-        )
-
     if getattr(ns, "format", None):
         formats = _normalize_formats(ns.format, ["txt"])
         for spec in specs:
@@ -525,6 +516,18 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         remote_timeout=timeout,
         remote_retries=retries,
     )
+
+    # Register the job only once every usage/format/mutex/out-dir check has
+    # passed and the run is about to start; failed validations must not leave
+    # stale entries in the jobs index.
+    job_id = None
+    if out_dir is not None and not ctx.dry_run:
+        ensure_output_unlocked(out_dir)
+        from ..jobs import register_job
+
+        job_id = register_job(
+            out_dir, command="transcribe", total=len(specs) + len(spec_errors)
+        )
 
     result = core.run(settings, specs, spec_errors, log=ctx.log, config=cfg)
     if job_id is not None:
