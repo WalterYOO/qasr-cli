@@ -12,12 +12,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Sequence
 
 from .audio import AudioInfo
-from .errors import CapabilityError, ModelError
+from .errors import CapabilityError, ModelError, RuntimeFailure
 from .inputs import InputItem
 from .runtime import (
     configure_offline,
     import_qwen_asr,
     import_torch,
+    require_vllm,
     resolve_device,
     resolve_dtype,
     stdout_to_stderr,
@@ -398,7 +399,159 @@ class TransformersBackend(_BaseTransformersModel):
                 pass
 
 
+class VLLMBackend(_BaseTransformersModel):
+    """Offline vLLM backend (Linux + CUDA). Loaded lazily via qwen_asr.LLM."""
+
+    name = "vllm"
+
+    def __init__(
+        self,
+        *args: Any,
+        gpu_memory_utilization: Optional[float] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.gpu_memory_utilization = gpu_memory_utilization
+        self._asr: Any = None
+        self._aligner: Any = None
+
+    def _prepare(self) -> None:
+        require_vllm()
+        super()._prepare()
+        if not self.device or not self.device.startswith("cuda"):
+            raise RuntimeFailure(
+                "the vLLM backend requires a CUDA device",
+                hint="use --backend transformers for MPS/CPU",
+            )
+
+    def _engine_kwargs(self) -> Dict[str, Any]:
+        dtype = {"fp32": "float32", "fp16": "float16", "bf16": "bfloat16"}[str(self.dtype)]
+        kwargs: Dict[str, Any] = {"device": self.device, "dtype": dtype}
+        if self.gpu_memory_utilization is not None:
+            kwargs["gpu_memory_utilization"] = float(self.gpu_memory_utilization)
+        return kwargs
+
+    def _aligner_kwargs(self) -> Dict[str, Any]:
+        return {
+            "dtype": self._torch_dtype_obj,
+            "local_files_only": self.offline,
+            "low_cpu_mem_usage": True,
+        }
+
+    def ensure_loaded(self, *, need_align: bool = False) -> None:
+        self._prepare()
+        if self._asr is None:
+            configure_offline(self.offline)
+            qwen_asr = import_qwen_asr()
+            use_aligner = need_align and self.aligner_path is not None
+            with stdout_to_stderr():
+                self._asr = qwen_asr.Qwen3ASRModel.LLM(
+                    str(self.model_path),
+                    forced_aligner=(
+                        str(self.aligner_path) if use_aligner else None
+                    ),
+                    forced_aligner_kwargs=(
+                        self._aligner_kwargs() if use_aligner else None
+                    ),
+                    max_inference_batch_size=self.max_inference_batch_size,
+                    max_new_tokens=self.max_new_tokens or 512,
+                    **self._engine_kwargs(),
+                )
+                self._aligner = getattr(self._asr, "forced_aligner", None)
+        elif need_align and self._aligner is None:
+            raise ModelError(
+                "timestamps were requested but the vLLM backend was loaded without an aligner",
+                hint="re-run with --timestamps and a valid --aligner",
+            )
+
+    def ensure_aligner(self) -> None:
+        if self._aligner is not None:
+            return
+        self._prepare()
+        qwen_asr = import_qwen_asr()
+        aligner_source = self.aligner_path or self.model_path
+        with stdout_to_stderr():
+            self._aligner = qwen_asr.Qwen3ForcedAligner.from_pretrained(
+                str(aligner_source),
+                **self._aligner_kwargs(),
+            )
+            self._aligner.model.to(self.device)
+
+    def transcribe(self, jobs: Sequence[TranscribeJob], opts: TranscribeOptions) -> List[TranscribeResult]:
+        if not jobs:
+            return []
+        need_align = bool(opts.timestamps)
+        if need_align and self.aligner_path is None:
+            raise CapabilityError(
+                "timestamps require an aligner model",
+                hint="qasr models pull aligner",
+            )
+        self.ensure_loaded(need_align=need_align)
+        audios = [str(job.item.path) for job in jobs]
+        contexts: List[str] = [job.context or "" for job in jobs]
+        languages: List[Optional[str]] = [job.language for job in jobs]
+        with stdout_to_stderr():
+            raw_results = self._asr.transcribe(
+                audio=audios,
+                context=contexts,
+                language=languages,
+                return_time_stamps=need_align,
+            )
+        results: List[TranscribeResult] = []
+        for job, raw in zip(jobs, raw_results):
+            text = clean_text(getattr(raw, "text", "") or "")
+            language = (getattr(raw, "language", "") or "").strip() or None
+            source = "forced" if job.language else "auto"
+            segments = segments_from_timestamps(
+                getattr(raw, "time_stamps", None) if need_align else None,
+                opts.granularity,
+            )
+            raw_segments = list(segments)
+            if opts.granularity == "sentence" and segments:
+                segments = aggregate_sentences(segments)
+            warnings: List[str] = []
+            if need_align and text and not segments:
+                warnings.append("timestamps were requested but the aligner returned no items")
+            results.append(
+                TranscribeResult(
+                    text=text,
+                    language=language,
+                    language_source=source,
+                    segments=segments,
+                    timestamp_source="forced_aligner" if segments else None,
+                    warnings=warnings,
+                    raw_segments=raw_segments,
+                )
+            )
+        return results
+
+    def align(self, jobs: Sequence[AlignJob], opts: AlignOptions) -> List[AlignResult]:
+        if not jobs:
+            return []
+        self.ensure_aligner()
+        with stdout_to_stderr():
+            raw_results = self._aligner.align(
+                audio=[str(job.item.path) for job in jobs],
+                text=[job.text for job in jobs],
+                language=[job.language for job in jobs],
+            )
+        return [
+            AlignResult(items=segments_from_timestamps(raw, "word"), warnings=[])
+            for raw in raw_results
+        ]
+
+    def close(self) -> None:
+        self._asr = None
+        self._aligner = None
+        if self._torch is not None:
+            try:
+                self._torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+
 _CACHE: Dict[tuple, TransformersBackend] = {}
+_VLLM_CACHE: Dict[tuple, VLLMBackend] = {}
 
 
 def build_transformers_backend(
@@ -439,7 +592,45 @@ def build_transformers_backend(
     return backend
 
 
+def build_vllm_backend(
+    model_path: str | Path,
+    *,
+    aligner_path: Optional[str | Path] = None,
+    device: str = "auto",
+    dtype: str = "auto",
+    max_inference_batch_size: int = 1,
+    max_new_tokens: Optional[int] = None,
+    gpu_memory_utilization: Optional[float] = None,
+    offline: bool = False,
+) -> VLLMBackend:
+    key = (
+        str(Path(model_path).resolve()),
+        str(Path(aligner_path).resolve()) if aligner_path else None,
+        device,
+        dtype,
+        int(max_inference_batch_size or 1),
+        int(max_new_tokens) if max_new_tokens else None,
+        float(gpu_memory_utilization) if gpu_memory_utilization is not None else None,
+        bool(offline),
+    )
+    backend = _VLLM_CACHE.get(key)
+    if backend is None:
+        backend = VLLMBackend(
+            model_path,
+            aligner_path=aligner_path,
+            device=device,
+            dtype=dtype,
+            max_inference_batch_size=max_inference_batch_size,
+            max_new_tokens=max_new_tokens,
+            gpu_memory_utilization=gpu_memory_utilization,
+            offline=offline,
+        )
+        _VLLM_CACHE[key] = backend
+    return backend
+
+
 def clear_backend_cache() -> None:
-    for backend in _CACHE.values():
+    for backend in list(_CACHE.values()) + list(_VLLM_CACHE.values()):
         backend.close()
     _CACHE.clear()
+    _VLLM_CACHE.clear()

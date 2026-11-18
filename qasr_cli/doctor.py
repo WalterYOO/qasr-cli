@@ -104,8 +104,41 @@ def _check_transformers() -> Dict[str, Any]:
 def _check_vllm() -> Dict[str, Any]:
     version = _dist_version("vllm")
     if version is None:
-        return _check("vllm", "ok", None, "not installed (optional; P0 uses transformers)")
-    return _check("vllm", "ok", version, "installed (vLLM backend is P1)")
+        return _check("vllm", "ok", None, "not installed (optional; auto uses transformers)")
+    return _check("vllm", "ok", version, "installed (Linux + CUDA only)")
+
+
+def _check_backend(config: Optional[Config]) -> Dict[str, Any]:
+    """Report the configured backend and what ``auto`` resolves to.
+
+    Metadata only: this module must not import torch/vllm.
+    """
+    selected = str((config.get("backend") if config is not None else None) or "auto")
+    server = config.get("server") if config is not None else None
+    if server:
+        resolved = "remote"
+    elif selected != "auto":
+        resolved = selected
+    elif (
+        sys.platform.startswith("linux")
+        and _dist_version("torch") is not None
+        and _dist_version("vllm") is not None
+    ):
+        resolved = "vllm"
+    else:
+        resolved = "transformers"
+    hint = None
+    status = "ok"
+    if resolved == "vllm" and not sys.platform.startswith("linux"):
+        status = "warn"
+        hint = "vLLM requires Linux + CUDA; use --backend transformers"
+    return _check(
+        "backend",
+        status,
+        {"selected": selected, "resolved": resolved},
+        f"selected {selected}, resolved {resolved}",
+        hint,
+    )
 
 
 def _check_device() -> Dict[str, Any]:
@@ -255,6 +288,7 @@ def run_doctor(config: Optional[Config] = None, *, server: Optional[str] = None)
         _check_qwen_asr(),
         _check_transformers(),
         _check_vllm(),
+        _check_backend(config),
         _check_device(),
         _check_memory(),
         _check_home_writable(),

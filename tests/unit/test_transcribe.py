@@ -399,3 +399,40 @@ def test_backend_sentence_granularity_aggregates_json_segments(monkeypatch, tmp_
     )[0]
     assert [seg.text for seg in result.segments] == ["你好。", "再见"]
     assert len(result.raw_segments) == 5
+
+
+def test_vllm_batch_failure_is_retried_item_by_item(monkeypatch, tmp_path, model_dir):
+    wavs = [write_wav(tmp_path / f"{name}.wav") for name in ("a", "b", "c")]
+    backend = FakeBackend(fail_ids={"b"})
+    monkeypatch.setattr(core, "build_vllm_backend", lambda *a, **k: backend)
+    specs = [_spec(wav) for wav in wavs]
+    result = core.run(
+        _settings(
+            model_dir,
+            backend_name="vllm",
+            device="cuda",
+            dtype="bf16",
+            batch_size=2,
+            stdout_mode="json",
+        ),
+        specs,
+    )
+    assert result.exit_code == EXIT_PARTIAL
+    payload = json.loads(result.stdout)
+    assert payload["summary"] == {"total": 3, "ok": 2, "failed": 1, "skipped": 0}
+    assert backend.batch_sizes == [2, 1, 1, 1]
+    failures = {item["id"] for item in payload["errors"]}
+    assert failures == {"b"}
+
+
+def test_backend_fallback_is_reported_in_payload(monkeypatch, tmp_path, model_dir):
+    wav = write_wav(tmp_path / "a.wav")
+    backend = FakeBackend()
+    monkeypatch.setattr(core, "build_transformers_backend", lambda *a, **k: backend)
+    result = core.run(
+        _settings(model_dir, stdout_mode="json", backend_fallback=True),
+        [_spec(wav)],
+    )
+    payload = json.loads(result.stdout)
+    assert payload["backend_fallback"] is True
+    assert any("vllm unavailable" in warning for warning in payload["result"]["warnings"])

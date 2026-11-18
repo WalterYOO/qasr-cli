@@ -1,0 +1,282 @@
+"""N3: VLLMBackend against fake torch/qwen_asr modules."""
+
+from __future__ import annotations
+
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+from qasr_cli.backends import (
+    AlignJob,
+    AlignOptions,
+    Segment,
+    TranscribeJob,
+    TranscribeOptions,
+    VLLMBackend,
+    build_vllm_backend,
+    clear_backend_cache,
+)
+from qasr_cli.cli import main
+from qasr_cli.commands.common import default_batch_size, resolve_backend
+from qasr_cli.errors import RuntimeFailure
+from qasr_cli.inputs import InputItem
+from tests.conftest import write_wav
+
+
+class _Raw:
+    def __init__(self, text, language="Chinese", stamps=None):
+        self.text = text
+        self.language = language
+        self.time_stamps = stamps
+
+
+class _StampItem:
+    def __init__(self, text, start, end):
+        self.text = text
+        self.start_time = start
+        self.end_time = end
+
+
+class _StampResult:
+    def __init__(self, items):
+        self.items = items
+
+
+class _Engine:
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.transcribe_kwargs = kwargs
+        type(self).instances.append(self)
+
+    def transcribe(self, *, audio, context, language, return_time_stamps=False):
+        self.last_call = {
+            "audio": list(audio),
+            "context": list(context),
+            "language": list(language),
+            "return_time_stamps": return_time_stamps,
+        }
+        results = []
+        for index, _path in enumerate(audio):
+            stamps = None
+            if return_time_stamps:
+                stamps = _StampResult([_StampItem(f"w{index}", 0.0, 0.5)])
+            results.append(_Raw(f"text-{index}", "Chinese", stamps))
+        return results
+
+
+class _FakeQwen:
+    last_kwargs = None
+    last_model = None
+
+    @classmethod
+    def LLM(cls, model, **kwargs):
+        cls.last_model = model
+        cls.last_kwargs = kwargs
+        return _Engine(**kwargs)
+
+
+def _install_fakes(monkeypatch, *, cuda=True):
+    torch = types.ModuleType("torch")
+    torch.float32 = "float32"
+    torch.float16 = "float16"
+    torch.bfloat16 = "bfloat16"
+    torch.cuda = types.SimpleNamespace(
+        is_available=lambda: cuda, empty_cache=lambda: None
+    )
+    vllm = types.ModuleType("vllm")
+    qwen = types.ModuleType("qwen_asr")
+    qwen.Qwen3ASRModel = _FakeQwen
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "vllm", vllm)
+    monkeypatch.setitem(sys.modules, "qwen_asr", qwen)
+    monkeypatch.setattr(sys, "platform", "linux")
+    _FakeQwen.last_kwargs = None
+    _FakeQwen.last_model = None
+    _Engine.instances = []
+    clear_backend_cache()
+    return torch
+
+
+def _job(wav: Path, language="Chinese", context="") -> TranscribeJob:
+    item = InputItem(id=wav.stem, source=str(wav), path=wav)
+    return TranscribeJob(item=item, info=None, language=language, context=context)
+
+
+def test_vllm_constructor_kwargs_and_batch(monkeypatch, tmp_path):
+    _install_fakes(monkeypatch)
+    wav_a = write_wav(tmp_path / "a.wav", seconds=0.2)
+    wav_b = write_wav(tmp_path / "b.wav", seconds=0.2)
+    backend = build_vllm_backend(
+        tmp_path,
+        device="cuda:1",
+        dtype="fp16",
+        max_inference_batch_size=8,
+        max_new_tokens=256,
+        gpu_memory_utilization=0.7,
+    )
+    results = backend.transcribe(
+        [_job(wav_a, context="terms"), _job(wav_b)],
+        TranscribeOptions(),
+    )
+    kwargs = _FakeQwen.last_kwargs
+    assert _FakeQwen.last_model == str(tmp_path.resolve())
+    assert kwargs["device"] == "cuda:1"
+    assert kwargs["dtype"] == "float16"
+    assert kwargs["max_inference_batch_size"] == 8
+    assert kwargs["max_new_tokens"] == 256
+    assert kwargs["gpu_memory_utilization"] == 0.7
+    assert kwargs["forced_aligner"] is None
+    engine = _Engine.instances[0]
+    assert engine.last_call["context"] == ["terms", ""]
+    assert engine.last_call["language"] == ["Chinese", "Chinese"]
+    assert engine.last_call["return_time_stamps"] is False
+    assert [result.text for result in results] == ["text-0", "text-1"]
+    assert results[0].language_source == "forced"
+
+
+def test_vllm_timestamp_path_uses_aligner(monkeypatch, tmp_path):
+    _install_fakes(monkeypatch)
+    wav = write_wav(tmp_path / "a.wav", seconds=0.2)
+    aligner = tmp_path / "aligner"
+    aligner.mkdir()
+    backend = build_vllm_backend(tmp_path, aligner_path=aligner)
+    results = backend.transcribe(
+        [_job(wav)], TranscribeOptions(timestamps=True, granularity="word")
+    )
+    kwargs = _FakeQwen.last_kwargs
+    assert kwargs["forced_aligner"] == str(aligner.resolve())
+    assert kwargs["forced_aligner_kwargs"]["local_files_only"] is False
+    assert _Engine.instances[0].last_call["return_time_stamps"] is True
+    assert results[0].timestamp_source == "forced_aligner"
+    assert results[0].segments == [Segment("w0", 0.0, 0.5, "word")]
+
+
+def test_vllm_requires_cuda(monkeypatch, tmp_path):
+    _install_fakes(monkeypatch, cuda=False)
+    backend = VLLMBackend(tmp_path)
+    with pytest.raises(RuntimeFailure, match="CUDA"):
+        backend.ensure_loaded()
+
+
+def test_vllm_requires_linux(monkeypatch, tmp_path):
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    backend = VLLMBackend(tmp_path)
+    with pytest.raises(RuntimeFailure, match="Linux"):
+        backend.ensure_loaded()
+
+
+def test_vllm_align_loads_aligner(monkeypatch, tmp_path):
+    _install_fakes(monkeypatch)
+    calls = {}
+
+    class _Aligner:
+        class model:
+            @staticmethod
+            def to(device):
+                calls["device"] = device
+
+        @classmethod
+        def align(cls, *, audio, text, language):
+            calls["align"] = (audio, text, language)
+            return [_StampResult([_StampItem("hello", 0.0, 0.4)])]
+
+    class _AlignerFactory:
+        @classmethod
+        def from_pretrained(cls, source, **kwargs):
+            calls["source"] = source
+            return _Aligner
+
+    sys.modules["qwen_asr"].Qwen3ForcedAligner = _AlignerFactory
+    aligner = tmp_path / "aligner"
+    aligner.mkdir()
+    backend = VLLMBackend(tmp_path, aligner_path=aligner)
+    jobs = [AlignJob(item=_job(write_wav(tmp_path / "a.wav")).item, info=None,
+                     text="hello", language="Chinese")]
+    results = backend.align(jobs, AlignOptions())
+    assert calls["source"] == str(aligner)
+    assert calls["align"][1] == ["hello"]
+    assert results[0].items == [Segment("hello", 0.0, 0.4, "word")]
+
+
+def test_vllm_unavailable_falls_back_in_auto(monkeypatch):
+    torch = types.ModuleType("torch")
+    torch.cuda = types.SimpleNamespace(is_available=lambda: True)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "vllm", None)  # import raises
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    class _Config:
+        def get(self, key):
+            return {"server": None, "backend": "auto"}.get(key)
+
+    assert resolve_backend(_Config()) == ("transformers", True)
+
+
+def test_vllm_available_in_auto(monkeypatch):
+    torch = types.ModuleType("torch")
+    torch.cuda = types.SimpleNamespace(is_available=lambda: True)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "vllm", types.ModuleType("vllm"))
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    class _Config:
+        def get(self, key):
+            return {"server": None, "backend": "auto"}.get(key)
+
+    assert resolve_backend(_Config()) == ("vllm", False)
+
+
+def test_default_batch_size():
+    assert default_batch_size("vllm") == 8
+    assert default_batch_size("transformers") == 1
+    assert default_batch_size("remote") == 1
+
+
+def test_cli_explicit_vllm_fails_fast_on_mac(capsys, tmp_path):
+    wav = write_wav(tmp_path / "a.wav")
+    code = main(["--backend", "vllm", "transcribe", str(wav), "--json"])
+    out = capsys.readouterr()
+    assert code == 3
+    assert "Linux" in out.out
+
+
+def test_cli_auto_stays_transformers_on_mac(capsys, tmp_path):
+    wav = write_wav(tmp_path / "a.wav", seconds=0.2)
+    code = main(["--backend", "auto", "transcribe", str(wav), "--dry-run", "--json"])
+    out = capsys.readouterr()
+    assert code == 0, out.err
+    plan = __import__("json").loads(out.out)["plan"]
+    assert plan["backend"] == "transformers"
+    assert plan["backend_fallback"] is False
+
+
+def test_gpu_memory_utilization_conflicts_with_transformers(capsys, tmp_path):
+    wav = write_wav(tmp_path / "a.wav")
+    code = main(["--backend", "transformers", "--gpu-memory-utilization", "0.8",
+                 "transcribe", str(wav), "--json"])
+    out = capsys.readouterr()
+    assert code == 2
+    assert "--gpu-memory-utilization" in out.out
+
+
+def test_gpu_memory_utilization_conflicts_with_remote(capsys, tmp_path):
+    wav = write_wav(tmp_path / "a.wav")
+    code = main(["--server", "http://127.0.0.1:9", "--gpu-memory-utilization", "0.8",
+                 "transcribe", str(wav), "--json"])
+    out = capsys.readouterr()
+    assert code == 2
+    assert "--gpu-memory-utilization" in out.out
+
+
+def test_doctor_reports_auto_backend_resolution(capsys):
+    import json
+
+    assert main(["doctor", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    check = next(item for item in payload["checks"] if item["name"] == "backend")
+    assert check["value"]["selected"] == "auto"
+    assert check["value"]["resolved"] == "transformers"

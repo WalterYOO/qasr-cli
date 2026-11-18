@@ -15,6 +15,7 @@ from .backends import (
     TranscribeOptions,
     TranscribeResult,
     build_transformers_backend,
+    build_vllm_backend,
 )
 from .config import Config
 from .errors import (
@@ -104,6 +105,8 @@ class TranscribeSettings:
     aligner_path: Optional[Path] = None
     aligner_fingerprint: Optional[str] = None
     backend_name: str = "transformers"
+    backend_fallback: bool = False
+    gpu_memory_utilization: Optional[float] = None
     device: str = "auto"
     dtype: str = "auto"
     attn_implementation: str = "auto"
@@ -300,6 +303,7 @@ def run(
             },
             "aligner": {"path": str(settings.aligner_path)} if settings.aligner_path else None,
             "backend": settings.backend_name,
+            "backend_fallback": settings.backend_fallback,
             "device": settings.device,
             "dtype": settings.dtype,
             "timestamps": any(spec.timestamps for spec in specs),
@@ -466,16 +470,28 @@ def _run_locked(
             log(f"remote backend ready ({load_ms} ms)")
         else:
             try:
-                backend = build_transformers_backend(
-                    settings.model_path,
-                    aligner_path=settings.aligner_path,
-                    device=settings.device,
-                    dtype=settings.dtype,
-                    attn_implementation=settings.attn_implementation,
-                    max_inference_batch_size=settings.max_inference_batch_size,
-                    max_new_tokens=max_tokens,
-                    offline=settings.offline,
-                )
+                if settings.backend_name == "vllm":
+                    backend = build_vllm_backend(
+                        settings.model_path,
+                        aligner_path=settings.aligner_path,
+                        device=settings.device,
+                        dtype=settings.dtype,
+                        max_inference_batch_size=settings.max_inference_batch_size,
+                        max_new_tokens=max_tokens,
+                        gpu_memory_utilization=settings.gpu_memory_utilization,
+                        offline=settings.offline,
+                    )
+                else:
+                    backend = build_transformers_backend(
+                        settings.model_path,
+                        aligner_path=settings.aligner_path,
+                        device=settings.device,
+                        dtype=settings.dtype,
+                        attn_implementation=settings.attn_implementation,
+                        max_inference_batch_size=settings.max_inference_batch_size,
+                        max_new_tokens=max_tokens,
+                        offline=settings.offline,
+                    )
                 ensure = getattr(backend, "ensure_loaded", None)
                 if callable(ensure):
                     ensure(need_align=any(spec.timestamps and not spec.empty for spec in pending))
@@ -484,7 +500,8 @@ def _run_locked(
             except QasrError:
                 raise
             except Exception as exc:
-                raise RuntimeFailure(f"failed to load model: {exc}") from exc
+                label = "vLLM model" if settings.backend_name == "vllm" else "model"
+                raise RuntimeFailure(f"failed to load {label}: {exc}") from exc
 
     if state_path is not None and not stop_early:
         started_at = now_iso()
@@ -647,6 +664,9 @@ def _run_locked(
     if settings.stdout_mode == "json" and payload is None and total_requested == 1 and spec_errors:
         payload = batch_payload([], spec_errors, total=1)
 
+    if settings.backend_fallback and isinstance(payload, dict):
+        payload["backend_fallback"] = True
+
     # ---- exit code ------------------------------------------------------
     ok_count = sum(1 for spec in specs if spec.error is None and not spec.skipped)
     completed_count = ok_count + skipped_count
@@ -808,6 +828,12 @@ def _complete_item(
     duration = spec.info.duration_s if spec.info else 0.0
     wall_ms = load_ms + infer_ms
     rtf = (infer_ms / (duration * 1000)) if duration > 0 else None
+    if settings.backend_fallback and result is not None and "vllm unavailable" not in " ".join(
+        getattr(result, "warnings", [])
+    ):
+        result.warnings.append(
+            "vllm unavailable on this host; fell back to transformers"
+        )
     spec.result = result
     spec.metrics = {
         "load_ms": load_ms,
@@ -833,6 +859,8 @@ def _complete_item(
         metrics=spec.metrics,
         outputs=outputs,
     )
+    if settings.backend_fallback:
+        spec.payload["backend_fallback"] = True
     if state_path is not None:
         if state_lock is None:
             _append_done(state_path, spec, outputs)

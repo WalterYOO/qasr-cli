@@ -1,7 +1,7 @@
 # qasr-cli P1 实现报告
 
 > 任务书：`P1-TASKS.md`（含 2026-11-18 a53859c 澄清）。
-> 状态：进行中（N1、N2 已完成，N3–N5 待做）。
+> 状态：进行中（N1–N3 已完成，N4–N5 待做）。
 
 ## 1. 里程碑对照
 
@@ -9,7 +9,7 @@
 |---|---|---|
 | N1 | ✅ 完成 | `serve` 薄包装、全局 `--server`、`doctor --server`、token 边界 |
 | N2 | ✅ 完成 | 远程客户端、context/chat、并发与错误映射 |
-| N3 | ⏳ 待做 | vLLM 后端与 auto 选择 |
+| N3 | ✅ 完成 | vLLM 后端与 auto 选择 |
 | N4 | ⏳ 待做 | 长音频窗口化、`align --language auto` |
 | N5 | ⏳ 待做 | 批量运维命令、tsv/md、schema/README |
 
@@ -20,7 +20,7 @@
 
 ```bash
 uv run ruff check qasr_cli tests        # All checks passed
-UV_HTTP_TIMEOUT=300 uv run --no-sync pytest -q   # 242 passed, 6 skipped
+UV_HTTP_TIMEOUT=300 uv run --no-sync pytest -q   # 257 passed, 6 skipped
 ```
 
 集成测试（需要本机模型）使用：
@@ -103,12 +103,29 @@ chat 路径无法强制语言：只要实际使用 chat 且用户显式给了 `-
 transcription 404/405 降级后）就产生 `language_not_enforced_on_chat`；
 解析语言与请求语言不一致（且可映射 ISO）时产生 `server_ignored_language`。
 
+### 4.11 vLLM 后端与 auto 选择
+
+- `VLLMBackend` 通过 `Qwen3ASRModel.LLM(...)` 懒加载，参数含 `device`、`dtype`
+  （fp32/fp16/bf16 → vLLM 字符串）、`gpu_memory_utilization`、`max_new_tokens`、
+  `max_inference_batch_size`。`--timestamps` 时把 forced aligner 一并传入，时间戳
+  仍由 HF aligner 产生；`align` 命令同样复用 HF aligner。
+- 显式 `--backend vllm` 在非 Linux/无 CUDA/无 vllm 时可导入性检查失败 → 退出 3，
+  hint 指向 `qasr-cli[vllm]`；不会静默回退。
+- `auto`：`--server` → remote；Linux+CUDA 且 vllm 可导入 → vllm；否则
+  transformers。Linux+CUDA 但 vllm 导入失败时回退 transformers，并在 JSON
+  顶层与结果项写 `backend_fallback: true` + warning。
+- vLLM 默认 `--batch-size 8`（其余后端 1）；微批失败仍逐条重试定位。
+- `--gpu-memory-utilization` 仅 vLLM 可用，其他后端 → 退出 2；取值需在 (0, 1]。
+- `doctor` 增加 `backend` check，报告 selected 与 auto resolved（仅读安装元数据，
+  不 import torch/vllm）。
+
 ## 5. 已知限制
 
 - 远程不返回时间戳，也不提供对齐端点（capability error，退出 4，且在发请求前拒绝）。
 - 远程 `--jobs` 默认 4、范围 1–32；state 的 running/done 追加已串行化，fail-fast
   取消排队任务并由收尾阶段补 skipped，不留下 running 记录。
 - 远程单文件 >25MB 仍直接拒绝；客户端切块（默认 270s）在 N4 接入。
+- vLLM 真机验收（gpu06）由协调者安排；本地只做假模块单测，未操作服务器。
 - 远程 RTF 含网络时间，仅作记录，不作门禁。
 - `QASR_SERVE_TOKEN` 只从环境变量读取；不写入配置、state、jobs 或日志。
 
@@ -116,5 +133,6 @@ transcription 404/405 降级后）就产生 `language_not_enforced_on_chat`；
 
 - 假 OpenAI 服务与 serve/doctor 契约测试：`tests/contract/test_serve_doctor.py`
 - 远程客户端测试：`tests/contract/test_remote_client.py`（multipart/chat/降级/重试/并发/state/schema/重定向）
+- vLLM 假模块测试：`tests/unit/test_vllm_backend.py`；核心批量/fallback：`tests/unit/test_transcribe.py`
 - 长音频纯函数测试：N4 完成后补充 `tests/unit/test_long_audio.py`
 - 全量：`uv run pytest -q`；GPU：`RUN_INTEGRATION=1 ... pytest -m integration`

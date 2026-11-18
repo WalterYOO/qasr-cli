@@ -17,7 +17,14 @@ from ..errors import (
 from ..inputs import InputItem, expand_inputs, resolve_manifest_audio
 from ..jobs import ensure_output_unlocked, load_manifest
 from ..languages import resolve_alignable, resolve_forceable
-from .common import CommandContext, parse_auto_int, resolve_device_dtype, selected_backend
+from .common import (
+    CommandContext,
+    default_batch_size,
+    parse_auto_int,
+    resolve_backend,
+    resolve_device_dtype,
+    selected_backend,
+)
 
 GRANULARITIES = ("sentence", "word", "char")
 
@@ -77,6 +84,11 @@ def _normalize_formats(value: Any, default: Sequence[str]) -> List[str]:
 def handle(ns: Any, ctx: CommandContext) -> int:
     cfg = ctx.config
     is_remote = selected_backend(cfg) == "remote"
+    backend_choice, backend_fallback = resolve_backend(cfg)
+    if backend_choice == "vllm":
+        from ..runtime import require_vllm
+
+        require_vllm()
 
     if getattr(ns, "manifest", None) and getattr(ns, "inputs", None):
         raise UsageError("--manifest cannot be combined with positional inputs")
@@ -268,7 +280,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     if batch_size is None:
         batch_size = cfg.get("batch_size")
     if batch_size is None:
-        batch_size = 1
+        batch_size = default_batch_size(backend_choice)
     if int(batch_size) < 1:
         raise UsageError("--batch-size must be >= 1")
     if is_remote:
@@ -314,6 +326,17 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     if retries < 0 or retries > 20:
         raise UsageError("--retries must be between 0 and 20")
 
+    gpu_util = getattr(ns, "gpu_memory_utilization", None)
+    if gpu_util is not None:
+        gpu_util = float(gpu_util)
+        if backend_choice != "vllm":
+            raise UsageError(
+                "--gpu-memory-utilization requires --backend vllm",
+                hint="it is ignored by transformers and remote backends",
+            )
+        if not 0.0 < gpu_util <= 1.0:
+            raise UsageError("--gpu-memory-utilization must be in (0, 1]")
+
     max_new_tokens = parse_auto_int(getattr(ns, "max_new_tokens", None))
 
     # ---- model / aligner ------------------------------------------------
@@ -342,14 +365,14 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     aligner = resolve_aligner(cfg.get("aligner"), cfg, required=need_align and not ctx.dry_run) if need_align else None
     aligner_path = aligner.path if aligner is not None else None
 
-    backend_name = selected_backend(cfg)
-    if backend_name == "auto":
-        backend_name = "transformers"
-    if backend_name not in ("transformers", "remote"):
+    backend_name = backend_choice
+    if backend_name not in ("transformers", "vllm", "remote"):
         raise ModelError(
-            f"backend '{backend_name}' is not available yet",
-            hint="vLLM support arrives in a later P1 milestone; use transformers or --server",
+            f"backend '{backend_name}' is not available",
+            hint="use --backend auto|transformers|vllm or --server",
         )
+    if backend_fallback:
+        ctx.warn("vLLM is not importable on this CUDA host; falling back to transformers")
 
     device, dtype = resolve_device_dtype(
         cfg, optional=ctx.dry_run or not needs_runtime or is_remote
@@ -372,6 +395,8 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         aligner_path=aligner_path,
         aligner_fingerprint=aligner_fingerprint,
         backend_name=backend_name,
+        backend_fallback=backend_fallback,
+        gpu_memory_utilization=gpu_util,
         device=device,
         dtype=dtype,
         attn_implementation=str(cfg.get("attn_implementation") or "auto"),

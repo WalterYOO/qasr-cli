@@ -87,6 +87,9 @@ def _add_common_flags(parser: argparse.ArgumentParser) -> None:
                         help="never touch the network")
     parser.add_argument("--server", metavar="URL", default=argparse.SUPPRESS,
                         help="remote OpenAI-compatible server (implies --backend remote)")
+    parser.add_argument("--gpu-memory-utilization", dest="gpu_memory_utilization",
+                        type=float, default=argparse.SUPPRESS,
+                        help="vLLM only; fraction of GPU memory to reserve")
     parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                         help="write one JSON object to stdout")
     parser.add_argument("--jsonl", action="store_true", default=argparse.SUPPRESS,
@@ -187,8 +190,6 @@ def _add_serve(sub: argparse._SubParsersAction) -> None:
     p.add_argument("model_target", nargs="?", metavar="MODEL", default=None)
     p.add_argument("--host", default=None)
     p.add_argument("--port", type=int, default=None)
-    p.add_argument("--gpu-memory-utilization", dest="gpu_memory_utilization",
-                   type=float, default=None)
 
 
 def _add_doctor(sub: argparse._SubParsersAction) -> None:
@@ -249,6 +250,7 @@ _GLOBAL_VALUE_FLAGS = frozenset(
         "--model-dir",
         "--log-level",
         "--server",
+        "--gpu-memory-utilization",
     }
 )
 _SERVE_VALUE_FLAGS = _GLOBAL_VALUE_FLAGS | {

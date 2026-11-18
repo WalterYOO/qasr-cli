@@ -16,6 +16,7 @@
         "model": {"type": "object"},
         "aligner": {"type": ["object", "null"]},
         "backend": {"type": "string"},
+        "backend_fallback": {"type": "boolean"},
         "device": {"type": "string"},
         "dtype": {"type": "string"},
         "language": {"type": "string"},

@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterator, Optional
 from .errors import ModelError, RuntimeFailure
 
 INSTALL_HINT = 'uv pip install "qasr-cli[local]"  (or uv tool install --python 3.12 "qasr-cli[local]")'
+VLLM_HINT = 'uv pip install "qasr-cli[vllm]"  (Linux + CUDA only)'
 
 
 @contextlib.contextmanager
@@ -157,3 +158,46 @@ def torch_dtype(name: str, torch_mod: Any = None) -> Any:
         return mapping[name]
     except KeyError as exc:
         raise ModelError(f"unknown dtype: {name}") from exc
+
+
+def vllm_probe() -> tuple[bool, bool]:
+    """Best-effort ``(available, attempted)`` check for the auto backend.
+
+    ``attempted`` is true only on Linux with CUDA where vLLM should work but
+    could not be imported; that case is reported as a transformers fallback.
+    """
+    if sys.platform != "linux":
+        return False, False
+    try:
+        torch_mod = importlib.import_module("torch")
+        if not torch_mod.cuda.is_available():
+            return False, False
+    except Exception:
+        return False, False
+    try:
+        importlib.import_module("vllm")
+        return True, False
+    except Exception:
+        return False, True
+
+
+def require_vllm() -> None:
+    """Fail fast (exit 3) when the explicit vLLM backend cannot run here."""
+    if sys.platform != "linux":
+        raise RuntimeFailure(
+            "the vLLM backend requires Linux with CUDA",
+            hint=f"use --backend transformers on {platform.system()}; {VLLM_HINT}",
+        )
+    torch_mod = import_torch()
+    if not torch_mod.cuda.is_available():
+        raise RuntimeFailure(
+            "the vLLM backend requires CUDA, but CUDA is not available",
+            hint=f"use --backend transformers; {VLLM_HINT}",
+        )
+    try:
+        importlib.import_module("vllm")
+    except Exception as exc:
+        raise RuntimeFailure(
+            f"vllm is not importable: {exc}",
+            hint=VLLM_HINT,
+        ) from exc

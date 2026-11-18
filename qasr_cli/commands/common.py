@@ -80,3 +80,26 @@ def selected_backend(config: Config) -> str:
     if config.get("server"):
         return "remote"
     return str(config.get("backend") or "auto").strip().lower()
+
+
+def resolve_backend(config: Config) -> tuple[str, bool]:
+    """Resolve ``auto`` without loading any weights.
+
+    Returns ``(backend, fallback)``; ``fallback`` is true only when Linux+CUDA
+    looked capable but vLLM could not be imported, so the caller can surface
+    ``backend_fallback`` in JSON.
+    """
+    requested = selected_backend(config)
+    if requested != "auto":
+        return requested, False
+    from ..runtime import vllm_probe
+
+    available, attempted = vllm_probe()
+    if available:
+        return "vllm", False
+    return "transformers", attempted
+
+
+def default_batch_size(backend: str) -> int:
+    """Default micro-batch: 8 for vLLM, 1 for the other backends."""
+    return 8 if backend == "vllm" else 1
