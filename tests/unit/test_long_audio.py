@@ -31,6 +31,29 @@ def test_181_seconds_plans_two_windows_with_contiguous_cores():
         assert window.audio_end_sample - window.audio_start_sample <= 180 * SR
 
 
+def test_exactly_window_length_is_a_single_full_window():
+    windows = plan_windows(180 * SR, SR)
+    assert len(windows) == 1
+    window = windows[0]
+    assert window.audio_start_sample == 0
+    assert window.audio_end_sample == 180 * SR
+    assert window.core_start_sample == 0
+    assert window.core_end_sample == 180 * SR
+
+
+def test_exact_plain_chunk_limit_is_a_single_window():
+    windows = plan_windows(270 * SR, SR, window_s=270, max_window_s=270)
+    assert len(windows) == 1
+    assert windows[0].core_end_sample == 270 * SR
+
+
+def test_half_second_over_window_length_plans_two_windows():
+    windows = plan_windows(int(180.5 * SR), SR)
+    assert len(windows) == 2
+    assert windows[0].core_end_sample == windows[1].core_start_sample
+    assert windows[-1].core_end_sample == int(180.5 * SR)
+
+
 def test_one_hour_window_count_and_bounds():
     total = 3600 * SR
     windows = plan_windows(total, SR)

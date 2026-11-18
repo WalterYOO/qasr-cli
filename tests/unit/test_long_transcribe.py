@@ -190,3 +190,23 @@ def test_dry_run_reports_window_count(monkeypatch, tmp_path, long_audio):
     payload = json.loads(result.stdout)
     assert payload["plan"]["inputs"][0]["windows"] == 2
     assert backend.calls == []
+
+
+def test_dry_run_exact_max_chunk_duration_is_one_window(
+    monkeypatch, tmp_path
+):
+    path = write_wav(tmp_path / "exact.wav", seconds=1.0)
+    info = AudioInfo(
+        path=path, duration_s=180.0, sample_rate=16000, channels=1,
+        frames=180 * 16000, format="WAV",
+    )
+    monkeypatch.setattr(core, "probe", lambda _p: info)
+    result = core.run(
+        _settings(
+            tmp_path, out_dir=tmp_path / "out", stdout_mode="json",
+            dry_run=True, max_chunk_seconds=180.0,
+        ),
+        [_spec(path, info)],
+    )
+    payload = json.loads(result.stdout)
+    assert payload["plan"]["inputs"][0]["windows"] == 1

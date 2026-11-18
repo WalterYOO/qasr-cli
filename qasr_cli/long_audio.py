@@ -137,6 +137,12 @@ def plan_windows(
         return []
 
     window_samples = int(round(window_s * sr))
+    # A window that fits within the limit stays a single window: splitting it
+    # to leave room for the lookback overlap would create a short trailing
+    # window and break the "one window per <= window_s input" contract.
+    if total_samples <= window_samples:
+        return [Window(0, 0, total_samples, 0, total_samples)]
+
     overlap_samples = int(round(overlap_s * sr))
     core_samples = window_samples - overlap_samples
     slack_samples = int(round(MIN_CORE_SLACK_SECONDS * sr))
