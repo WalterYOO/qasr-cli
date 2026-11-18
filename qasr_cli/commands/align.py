@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, List
 
 from .. import align as core
-from ..catalog import FingerprintCache, resolve_aligner
+from ..catalog import FingerprintCache, require_local, resolve_aligner, resolve_model
 from ..errors import CapabilityError, InputError, UsageError
 from ..inputs import InputItem, sanitize_id
 from ..languages import ALIGNABLE, detect_script_language, resolve_alignable
@@ -70,17 +70,33 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     from ..audio import probe
 
     info = probe(audio_path)
-    if info.duration_s > core.MAX_ALIGN_SECONDS + 1e-6:
-        raise InputError(
-            f"align supports at most {int(core.MAX_ALIGN_SECONDS)}s per file, "
-            f"got {info.duration_s:.1f}s",
-            hint="split the audio first (long-form alignment arrives in P2)",
-            details={"duration_s": info.duration_s, "limit_s": core.MAX_ALIGN_SECONDS},
-        )
 
     text = _read_text(ns)
     if not text.strip():
         raise InputError("reference text is empty", hint="pass --text/--text-file/--srt")
+
+    # ---- windowing ------------------------------------------------------
+    window_seconds = getattr(ns, "window_seconds", None)
+    if window_seconds is None:
+        window_seconds = core.MAX_ALIGN_SECONDS
+    window_seconds = float(window_seconds)
+    if not 10.0 <= window_seconds <= core.MAX_ALIGN_SECONDS:
+        raise UsageError(
+            f"--window-seconds must be between 10 and {int(core.MAX_ALIGN_SECONDS)}",
+            details={"window_seconds": window_seconds},
+        )
+    window_overlap = getattr(ns, "window_overlap", None)
+    if window_overlap is None:
+        window_overlap = 3.0
+    window_overlap = float(window_overlap)
+    if not 0.0 <= window_overlap <= 10.0 or window_overlap >= window_seconds:
+        raise UsageError(
+            "--window-overlap must satisfy 0 <= overlap <= 10 and overlap < window",
+            details={"window_seconds": window_seconds, "window_overlap": window_overlap},
+        )
+    windows = core.long_audio.plan_windows(
+        info.frames, info.sample_rate, window_s=window_seconds, overlap_s=window_overlap
+    )
 
     raw_language = getattr(ns, "language", None)
     if raw_language is None and cfg.source_of("language") != "default":
@@ -90,12 +106,19 @@ def handle(ns: Any, ctx: CommandContext) -> int:
             "align requires --language",
             hint="one of " + ", ".join(ALIGNABLE) + " (or 'auto' for script detection)",
         )
+
+    language: Any = None
+    language_source = "explicit"
     if str(raw_language).strip().casefold() == "auto":
-        language = detect_script_language(text)
-        ctx.log(f"align: detected language {language} from script")
+        try:
+            language = detect_script_language(text)
+            language_source = "script"
+            ctx.log(f"align: detected language {language} from script")
+        except InputError:
+            language = None
     else:
         language = resolve_alignable(str(raw_language))
-    if language not in ALIGNABLE:
+    if language is not None and language not in ALIGNABLE:
         raise CapabilityError(f"language '{language}' cannot be aligned",
                               hint="alignable: " + ", ".join(ALIGNABLE))
 
@@ -124,6 +147,9 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     if not 0.0 <= coverage_min <= 1.0:
         raise UsageError("--coverage-min must be between 0 and 1")
 
+    item = InputItem(id=sanitize_id(Path(str(audio)).stem), source=str(audio),
+                     path=Path(str(audio)).expanduser().resolve(), origin="file")
+
     aligner = resolve_aligner(cfg.get("aligner"), cfg, required=not ctx.dry_run)
     if aligner is None:
         raise CapabilityError("no aligner model available", hint="qasr models pull aligner")
@@ -140,8 +166,23 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         fingerprint = cache.dir_fingerprint(aligner.path)
         cache.flush()
 
-    item = InputItem(id=sanitize_id(Path(str(audio)).stem), source=str(audio),
-                     path=Path(str(audio)).expanduser().resolve(), origin="file")
+    # ASR is needed for window anchors (long audio) and for Latin-script LID.
+    needs_asr = len(windows) > 1 or language is None
+    asr_path = None
+    asr_id = ""
+    asr_fingerprint = None
+    if needs_asr:
+        asr_model = resolve_model(cfg.get("model"), cfg)
+        asr_path = (
+            require_local(asr_model, action="align")
+            if not ctx.dry_run
+            else (asr_model.path or Path(str(asr_model.value)))
+        )
+        asr_id = asr_model.repo or asr_model.alias or str(asr_path)
+        if not ctx.dry_run and asr_model.present and asr_model.path is not None:
+            cache = FingerprintCache()
+            asr_fingerprint = cache.dir_fingerprint(asr_model.path)
+            cache.flush()
 
     settings = core.AlignSettings(
         aligner_path=aligner_path,
@@ -150,7 +191,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         device=device,
         dtype=dtype,
         attn_implementation=str(cfg.get("attn_implementation") or "auto"),
-        language=language,
+        language=language or "auto",
         granularity=getattr(ns, "granularity", None) or "word",
         formats=formats,
         out_dir=out_dir,
@@ -159,7 +200,39 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         dry_run=ctx.dry_run,
         coverage_min=float(coverage_min),
         offline=bool(cfg.get("offline")),
+        window_seconds=window_seconds,
+        window_overlap=window_overlap,
+        language_source=language_source,
+        asr_path=asr_path,
+        asr_id=asr_id,
+        asr_fingerprint=asr_fingerprint,
     )
+
+    if language is None:
+        if ctx.dry_run:
+            settings.language_source = "lid_probe"
+        else:
+            asr_backend = core.build_asr_backend(settings)
+            ensure = getattr(asr_backend, "ensure_loaded", None)
+            if callable(ensure):
+                ensure()
+            try:
+                detected = core.probe_language(asr_backend, item)
+            except Exception as exc:  # noqa: BLE001 - reported as input failure
+                raise InputError(
+                    "language identification probe failed",
+                    hint="pass --language " + "|".join(ALIGNABLE),
+                    details={"error": str(exc)},
+                ) from exc
+            if detected not in ALIGNABLE:
+                raise InputError(
+                    f"could not identify an alignable language (got {detected!r})",
+                    hint="pass --language " + "|".join(ALIGNABLE),
+                )
+            language = detected
+            settings.language = detected
+            settings.language_source = "lid_probe"
+            ctx.warn(f"align: identified language {detected} from audio (lid_probe)")
 
     result = core.run(settings, item, text, log=ctx.log)
     ctx.emit(result.stdout)

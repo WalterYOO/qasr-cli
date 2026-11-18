@@ -17,6 +17,18 @@
       }
     },
     "language": {"type": "string"},
+    "language_source": {"enum": ["explicit", "script", "lid_probe"]},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "window_plan": {
+      "type": "object",
+      "required": ["window_seconds", "window_overlap", "count", "windows"],
+      "properties": {
+        "window_seconds": {"type": "number", "maximum": 180},
+        "window_overlap": {"type": "number"},
+        "count": {"type": "integer", "minimum": 0},
+        "windows": {"type": "array", "items": {"type": "object"}}
+      }
+    },
     "result": {
       "type": "object",
       "required": ["items", "coverage", "warnings"],

@@ -125,6 +125,8 @@ def _add_transcribe(sub: argparse._SubParsersAction) -> None:
                    help="'auto' (default) or a positive integer")
     p.add_argument("--jobs", type=int, default=None)
     p.add_argument("--timeout", type=float, default=argparse.SUPPRESS, metavar="SECONDS")
+    p.add_argument("--max-chunk-seconds", dest="max_chunk_seconds", type=float,
+                   default=argparse.SUPPRESS, metavar="SECONDS")
     p.add_argument("--retries", type=int, default=argparse.SUPPRESS)
     p.add_argument("--recursive", action="store_true", default=False)
     p.add_argument("--manifest", metavar="FILE", default=None)
@@ -153,6 +155,10 @@ def _add_align(sub: argparse._SubParsersAction) -> None:
     p.add_argument("-o", "--out-dir", dest="out_dir", metavar="DIR", default=None)
     p.add_argument("--output", metavar="PATH|-", default=None)
     p.add_argument("--coverage-min", dest="coverage_min", type=float, default=0.5)
+    p.add_argument("--window-seconds", dest="window_seconds", type=float, default=180.0,
+                   metavar="SECONDS", help="alignment window (10-180, default 180)")
+    p.add_argument("--window-overlap", dest="window_overlap", type=float, default=3.0,
+                   metavar="SECONDS", help="left context overlap (0-10, default 3)")
 
 
 def _add_models(sub: argparse._SubParsersAction) -> None:

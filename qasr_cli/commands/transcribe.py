@@ -338,6 +338,21 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         if not 0.0 < gpu_util <= 1.0:
             raise UsageError("--gpu-memory-utilization must be in (0, 1]")
 
+    max_chunk = getattr(ns, "max_chunk_seconds", None)
+    if max_chunk is None:
+        max_chunk = 180.0 if timestamps_default else 270.0
+    max_chunk = float(max_chunk)
+    if not 10.0 <= max_chunk <= 1200.0:
+        raise UsageError("--max-chunk-seconds must be between 10 and 1200")
+    if timestamps_default and max_chunk > 180.0:
+        raise CapabilityError(
+            "--max-chunk-seconds cannot exceed the aligner's 180s hard limit",
+            hint="use --max-chunk-seconds 180 or lower with --timestamps",
+        )
+    if is_remote and max_chunk > 600.0:
+        ctx.warn("remote mode caps --max-chunk-seconds at 600 (25 MB upload limit)")
+        max_chunk = 600.0
+
     max_new_tokens = parse_auto_int(getattr(ns, "max_new_tokens", None))
 
     # ---- model / aligner ------------------------------------------------
@@ -414,6 +429,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         continue_on_error=not bool(getattr(ns, "fail_fast", False)),
         fail_fast=bool(getattr(ns, "fail_fast", False)),
         offline=bool(cfg.get("offline")),
+        max_chunk_seconds=max_chunk,
         jobs=jobs,
         remote_url=str(cfg.get("server") or "") if is_remote else None,
         remote_timeout=timeout,

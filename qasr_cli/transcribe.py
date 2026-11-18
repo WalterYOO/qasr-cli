@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from . import SCHEMA_VERSION
-from .audio import AudioInfo, max_new_tokens_for, probe
+from . import SCHEMA_VERSION, __version__, long_audio
+from .audio import AudioInfo, max_new_tokens_for, probe, read_window_16k, write_wav_16k
 from .backends import (
+    AlignJob,
+    AlignOptions,
+    Segment,
     TranscribeJob,
     TranscribeOptions,
     TranscribeResult,
+    _is_cjk_char,
+    aggregate_sentences,
     build_transformers_backend,
     build_vllm_backend,
 )
@@ -40,6 +47,7 @@ from .jobs import (
     append_jsonl,
     atomic_write_bytes,
     atomic_write_text,
+    canonical_json,
     now_iso,
     read_state,
     recover_running,
@@ -123,6 +131,7 @@ class TranscribeSettings:
     continue_on_error: bool = True
     fail_fast: bool = False
     offline: bool = False
+    max_chunk_seconds: float = 270.0
     jobs: int = 1
     remote_url: Optional[str] = None
     remote_timeout: float = 300.0
@@ -293,6 +302,7 @@ def run(
                     "source": spec.item.source,
                     "duration_s": spec.info.duration_s if spec.info else None,
                     "origin": spec.item.origin,
+                    "windows": _planned_window_count(spec, settings),
                 }
                 for spec in specs
             ],
@@ -309,6 +319,7 @@ def run(
             "timestamps": any(spec.timestamps for spec in specs),
             "formats": settings.formats,
             "max_new_tokens": max_tokens,
+            "max_chunk_seconds": settings.max_chunk_seconds,
             "outputs": plan_outputs,
             "errors": [_error_record(err) for err in spec_errors],
         }
@@ -531,12 +542,34 @@ def _run_locked(
     else:
         first_item = True
         batch_size = max(1, settings.batch_size)
-        for start in range(0, len(pending), batch_size):
-            group = pending[start:start + batch_size]
+        index = 0
+        while index < len(pending):
             if settings.fail_fast and any(spec.error for spec in specs):
                 break
+            spec = pending[index]
+            if _is_long(spec, settings):
+                _process_long_item(
+                    spec, backend, settings, log,
+                    load_ms=load_ms if first_item else 0,
+                    max_tokens=max_tokens,
+                    state_path=state_path,
+                    display_out_dir=display_out_dir,
+                )
+                first_item = False
+                index += 1
+                if settings.fail_fast and spec.error is not None:
+                    break
+                continue
+            group = []
+            while (
+                index < len(pending)
+                and len(group) < batch_size
+                and not _is_long(pending[index], settings)
+            ):
+                group.append(pending[index])
+                index += 1
             group_opts = TranscribeOptions(
-                timestamps=any(spec.timestamps for spec in group),
+                timestamps=any(item.timestamps for item in group),
                 granularity=group[0].granularity,
                 max_new_tokens=max_tokens,
             )
@@ -547,7 +580,7 @@ def _run_locked(
                 display_out_dir=display_out_dir,
             )
             first_item = False
-            if settings.fail_fast and any(spec.error for spec in group):
+            if settings.fail_fast and any(item.error for item in group):
                 break
 
     # Fail-fast leaves later items unattempted: give them an explicit terminal
@@ -751,6 +784,423 @@ def _process_group(
                            display_out_dir=display_out_dir)
 
 
+def _is_long(spec: ItemSpec, settings: TranscribeSettings) -> bool:
+    return bool(
+        spec.info is not None
+        and not spec.info.is_empty
+        and settings.max_chunk_seconds
+        and spec.info.duration_s > settings.max_chunk_seconds + 1e-6
+    )
+
+
+def _planned_window_count(spec: ItemSpec, settings: TranscribeSettings) -> int:
+    if spec.info is None or spec.info.is_empty:
+        return 0
+    if not _is_long(spec, settings):
+        return 1
+    return len(
+        long_audio.plan_windows(
+            spec.info.frames,
+            spec.info.sample_rate,
+            window_s=settings.max_chunk_seconds,
+            max_window_s=max(180.0, settings.max_chunk_seconds),
+        )
+    )
+
+
+def _dedupe(messages: Sequence[str]) -> List[str]:
+    out: List[str] = []
+    for message in messages:
+        if message and message not in out:
+            out.append(message)
+    return out
+
+
+def _transcribe_spec(
+    backend: Any,
+    spec: ItemSpec,
+    settings: TranscribeSettings,
+    max_tokens: int,
+) -> TranscribeResult:
+    if _is_long(spec, settings):
+        return _transcribe_long(backend, spec, settings, max_tokens)
+    job = TranscribeJob(
+        item=spec.item,
+        info=spec.info,
+        language=spec.language,
+        context=spec.context,
+    )
+    results = backend.transcribe(
+        [job],
+        TranscribeOptions(
+            timestamps=spec.timestamps,
+            granularity=spec.granularity,
+            max_new_tokens=max_tokens,
+        ),
+    )
+    return results[0]
+
+
+def _process_long_item(
+    spec: ItemSpec,
+    backend: Any,
+    settings: TranscribeSettings,
+    log: LogFn,
+    *,
+    load_ms: int,
+    max_tokens: int,
+    state_path: Optional[Path],
+    display_out_dir: Optional[str],
+    state_lock: Optional[Any] = None,
+) -> None:
+    started = time.perf_counter()
+    try:
+        result = _transcribe_long(backend, spec, settings, max_tokens)
+        elapsed = int((time.perf_counter() - started) * 1000)
+        _complete_item(
+            spec, result, settings, log,
+            load_ms=load_ms,
+            infer_ms=elapsed,
+            state_path=state_path,
+            display_out_dir=display_out_dir,
+            state_lock=state_lock,
+        )
+    except Exception as exc:  # noqa: BLE001 - reported per item
+        _fail_item(spec, exc, settings, log, state_path=state_path,
+                   display_out_dir=display_out_dir)
+
+
+def _chunk_dir(settings: TranscribeSettings, spec: ItemSpec) -> Optional[Path]:
+    if settings.out_dir is None or not spec.job_key:
+        return None
+    return settings.out_dir / STATE_DIRNAME / "chunks" / spec.job_key
+
+
+def _chunk_identity(
+    spec: ItemSpec, window: Any, settings: TranscribeSettings
+) -> str:
+    payload = {
+        "job_key": spec.job_key,
+        "index": window.index,
+        "audio_samples": [window.audio_start_sample, window.audio_end_sample],
+        "core_samples": [window.core_start_sample, window.core_end_sample],
+        "max_chunk_seconds": settings.max_chunk_seconds,
+        "language": spec.language,
+        "context": spec.context,
+        "model": settings.model_id,
+        "model_fingerprint": settings.model_fingerprint,
+        "aligner_fingerprint": settings.aligner_fingerprint,
+        "backend": settings.backend_name,
+        "qasr_version": __version__,
+    }
+    return sha256_bytes(canonical_json(payload).encode("utf-8"))
+
+
+def _read_chunk(
+    chunk_dir: Optional[Path], index: int, identity: str, *, resume: bool
+) -> Optional[Dict[str, Any]]:
+    if chunk_dir is None or not resume:
+        return None
+    path = chunk_dir / f"{index}.json"
+    if not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if record.get("chunk_key") != identity:
+        return None
+    return record
+
+
+def _write_chunk(
+    chunk_dir: Optional[Path], index: int, identity: str, record: Dict[str, Any]
+) -> None:
+    if chunk_dir is None:
+        return
+    record = {**record, "chunk_key": identity, "index": index}
+    atomic_write_text(
+        chunk_dir / f"{index}.json",
+        json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n",
+    )
+
+
+def _window_input(
+    spec: ItemSpec, window: Any, sr: int, tmp_dir: Path
+) -> Optional[tuple[InputItem, AudioInfo]]:
+    if spec.item.path is None:
+        return None
+    samples = read_window_16k(
+        spec.item.path, window.audio_start_sample, window.audio_end_sample
+    )
+    if len(samples) == 0:
+        return None
+    path = write_wav_16k(tmp_dir / f"window-{window.index}.wav", samples)
+    duration = len(samples) / 16000.0
+    item = InputItem(
+        id=f"{spec.id}#{window.index}",
+        source=str(path),
+        path=path,
+        origin="file",
+    )
+    info = AudioInfo(
+        path=path,
+        duration_s=duration,
+        sample_rate=16000,
+        channels=1,
+        frames=int(len(samples)),
+    )
+    return item, info
+
+
+def _join_window_text(previous: str, current: str) -> str:
+    """Join overlapping window text without repeating an exact suffix/prefix."""
+    left = previous.rstrip()
+    right = current.lstrip()
+    if not left:
+        return right
+    if not right:
+        return left
+    limit = min(len(left), len(right), 400)
+    overlap = 0
+    for size in range(limit, 1, -1):
+        if left[-size:] == right[:size]:
+            overlap = size
+            break
+    if overlap:
+        return left + right[overlap:]
+    if _is_cjk_char(left[-1]) or _is_cjk_char(right[0]):
+        return left + right
+    return left + " " + right
+
+
+def _transcribe_long(
+    backend: Any,
+    spec: ItemSpec,
+    settings: TranscribeSettings,
+    max_tokens: int,
+) -> TranscribeResult:
+    assert spec.info is not None
+    info = spec.info
+    windows = long_audio.plan_windows(
+        info.frames,
+        info.sample_rate,
+        window_s=settings.max_chunk_seconds,
+        max_window_s=max(180.0, settings.max_chunk_seconds),
+    )
+    chunk_dir = _chunk_dir(settings, spec)
+    if chunk_dir is not None and settings.overwrite and chunk_dir.exists():
+        shutil.rmtree(chunk_dir)
+    with tempfile.TemporaryDirectory(prefix="qasr-chunks-") as raw_tmp:
+        tmp_dir = Path(raw_tmp)
+        if spec.timestamps:
+            return _long_timestamps(
+                backend, spec, settings, windows, chunk_dir, tmp_dir, max_tokens
+            )
+        return _long_plain(
+            backend, spec, settings, windows, chunk_dir, tmp_dir, max_tokens
+        )
+
+
+def _long_plain(
+    backend: Any,
+    spec: ItemSpec,
+    settings: TranscribeSettings,
+    windows: Sequence[Any],
+    chunk_dir: Optional[Path],
+    tmp_dir: Path,
+    max_tokens: int,
+) -> TranscribeResult:
+    assert spec.info is not None
+    texts: List[str] = []
+    warnings: List[str] = []
+    language: Optional[str] = None
+    language_source = "forced" if spec.language else "auto"
+    for window in windows:
+        identity = _chunk_identity(spec, window, settings)
+        record = _read_chunk(chunk_dir, window.index, identity, resume=settings.resume)
+        if record is None:
+            prepared = _window_input(spec, window, spec.info.sample_rate, tmp_dir)
+            if prepared is None:
+                continue
+            item, window_info = prepared
+            window_tokens = (
+                settings.max_new_tokens
+                if settings.max_new_tokens is not None
+                else max_new_tokens_for(window_info.duration_s)
+            )
+            result = backend.transcribe(
+                [TranscribeJob(item=item, info=window_info,
+                               language=spec.language, context=spec.context)],
+                TranscribeOptions(
+                    timestamps=False,
+                    granularity="sentence",
+                    max_new_tokens=window_tokens,
+                ),
+            )[0]
+            record = {
+                "text": result.text,
+                "language": result.language,
+                "language_source": result.language_source,
+                "warnings": list(result.warnings),
+            }
+            _write_chunk(chunk_dir, window.index, identity, record)
+        warnings.extend(record.get("warnings") or [])
+        if language is None and record.get("language"):
+            language = record["language"]
+            language_source = record.get("language_source") or language_source
+        text = str(record.get("text") or "")
+        if text.strip():
+            texts.append(text)
+
+    text = ""
+    for piece in texts:
+        text = _join_window_text(text, piece)
+    if len(windows) > 1:
+        warnings.append("chunk_boundary_text_uncertain")
+    return TranscribeResult(
+        text=text,
+        language=language,
+        language_source=language_source,
+        segments=[],
+        timestamp_source=None,
+        warnings=_dedupe(warnings),
+    )
+
+
+def _long_timestamps(
+    backend: Any,
+    spec: ItemSpec,
+    settings: TranscribeSettings,
+    windows: Sequence[Any],
+    chunk_dir: Optional[Path],
+    tmp_dir: Path,
+    max_tokens: int,
+) -> TranscribeResult:
+    assert spec.info is not None
+    sr = spec.info.sample_rate
+    canonical = backend.transcribe(
+        [TranscribeJob(item=spec.item, info=spec.info,
+                       language=spec.language, context=spec.context)],
+        TranscribeOptions(timestamps=False, granularity="sentence",
+                          max_new_tokens=max_tokens),
+    )[0]
+    if not canonical.text.strip():
+        return canonical
+
+    warnings: List[str] = list(canonical.warnings)
+    language = spec.language or canonical.language or ""
+    records: Dict[int, Dict[str, Any]] = {}
+    anchors: List[str] = []
+    window_inputs: Dict[int, tuple[InputItem, AudioInfo]] = {}
+    for window in windows:
+        identity = _chunk_identity(spec, window, settings)
+        record = _read_chunk(chunk_dir, window.index, identity, resume=settings.resume)
+        if record is None:
+            prepared = _window_input(spec, window, sr, tmp_dir)
+            if prepared is None:
+                anchors.append("")
+                continue
+            item, window_info = prepared
+            window_inputs[window.index] = prepared
+            window_tokens = (
+                settings.max_new_tokens
+                if settings.max_new_tokens is not None
+                else max_new_tokens_for(window_info.duration_s)
+            )
+            anchor = backend.transcribe(
+                [TranscribeJob(item=item, info=window_info,
+                               language=spec.language, context=spec.context)],
+                TranscribeOptions(timestamps=False, granularity="sentence",
+                                  max_new_tokens=window_tokens),
+            )[0]
+            record = {"anchor_text": anchor.text, "warnings": list(anchor.warnings)}
+            records[window.index] = record
+        anchors.append(str(record.get("anchor_text") or ""))
+
+    spans = long_audio.attribute_reference(canonical.text, anchors)
+    items: List[Any] = []
+    for window, span in zip(windows, spans):
+        identity = _chunk_identity(spec, window, settings)
+        record = _read_chunk(chunk_dir, window.index, identity, resume=settings.resume)
+        if record is not None and record.get("items") is not None:
+            for raw_item in record["items"]:
+                items.append(Segment(**raw_item))
+            warnings.extend(record.get("warnings") or [])
+            continue
+        if span.is_weak:
+            warnings.append(
+                f"chunk_reference_match_low:{window.index}:{span.match_ratio:.2f}"
+            )
+        if not span.text.strip():
+            _write_chunk(chunk_dir, window.index, identity,
+                         {"anchor_text": anchors[window.index],
+                          "items": [], "warnings": []})
+            continue
+        prepared = window_inputs.get(window.index)
+        if prepared is None:
+            prepared = _window_input(spec, window, sr, tmp_dir)
+        if prepared is None:
+            continue
+        item, window_info = prepared
+        core_start_rel = (window.core_start_sample - window.audio_start_sample) / sr
+        core_end_rel = (window.core_end_sample - window.audio_start_sample) / sr
+        offset = window.audio_start_sample / sr
+        local: List[Segment] = []
+        window_warnings: List[str] = []
+        try:
+            aligned = backend.align(
+                [AlignJob(item=item, info=window_info, text=span.text,
+                          language=language)],
+                AlignOptions(granularity="word"),
+            )[0]
+        except QasrError as exc:
+            window_warnings.append(
+                f"chunk_align_failed:{window.index}:{exc.message}"
+            )
+            aligned = None
+        if aligned is not None:
+            for seg in aligned.items:
+                midpoint = (seg.start + seg.end) / 2.0
+                if not (core_start_rel <= midpoint < core_end_rel):
+                    continue
+                local.append(
+                    Segment(
+                        text=seg.text,
+                        start=seg.start + offset,
+                        end=seg.end + offset,
+                        kind=seg.kind,
+                    )
+                )
+            warnings.extend(aligned.warnings)
+        items.extend(local)
+        _write_chunk(
+            chunk_dir,
+            window.index,
+            identity,
+            {
+                "anchor_text": anchors[window.index],
+                "items": [seg.to_dict() for seg in local],
+                "warnings": window_warnings,
+            },
+        )
+        warnings.extend(window_warnings)
+
+    merged = long_audio.merge_items(items, duration_s=spec.info.duration_s)
+    segments = (
+        aggregate_sentences(merged) if spec.granularity == "sentence" else merged
+    )
+    return TranscribeResult(
+        text=canonical.text,
+        language=canonical.language,
+        language_source=canonical.language_source,
+        segments=segments,
+        timestamp_source="forced_aligner" if merged else None,
+        warnings=_dedupe(warnings),
+        raw_segments=merged,
+    )
+
+
 def _run_remote_items(
     pending: List[ItemSpec],
     backend: Any,
@@ -777,14 +1227,8 @@ def _run_remote_items(
     def work(spec: ItemSpec) -> Any:
         started = time.perf_counter()
         try:
-            results = backend.transcribe(
-                [TranscribeJob(item=spec.item, info=spec.info,
-                               language=spec.language, context=spec.context)],
-                TranscribeOptions(timestamps=spec.timestamps,
-                                  granularity=spec.granularity,
-                                  max_new_tokens=max_tokens),
-            )
-            return spec, results[0], None, int((time.perf_counter() - started) * 1000)
+            result = _transcribe_spec(backend, spec, settings, max_tokens)
+            return spec, result, None, int((time.perf_counter() - started) * 1000)
         except Exception as exc:  # noqa: BLE001 - translated per item below
             return spec, None, exc, int((time.perf_counter() - started) * 1000)
 
