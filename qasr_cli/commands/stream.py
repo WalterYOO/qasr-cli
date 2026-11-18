@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -115,8 +117,8 @@ def _validate_numbers(ns: Any) -> tuple[int, int, int, int, int, float]:
     if unfixed_tokens < 0:
         raise UsageError("--unfixed-tokens must be >= 0")
     max_seconds = float(getattr(ns, "max_stream_seconds", 3600.0))
-    if max_seconds <= 0:
-        raise UsageError("--max-stream-seconds must be > 0")
+    if not math.isfinite(max_seconds) or max_seconds <= 0:
+        raise UsageError("--max-stream-seconds must be a finite positive number")
     chunk_samples = int(round(chunk_ms * core_stream.SAMPLE_RATE / 1000))
     return (
         chunk_samples, channels, chunk_ms, unfixed_chunks, unfixed_tokens, max_seconds,
@@ -124,6 +126,8 @@ def _validate_numbers(ns: Any) -> tuple[int, int, int, int, int, float]:
 
 
 def handle(ns: Any, ctx: CommandContext) -> int:
+    # elapsed_s counts from process/handler start, including model loading.
+    started_at = time.monotonic()
     cfg = ctx.config
     input_value = str(getattr(ns, "input", "") or "").strip()
     if not input_value:
@@ -242,7 +246,9 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     except Exception as exc:  # noqa: BLE001
         raise RuntimeFailure(f"failed to load vLLM model: {exc}") from exc
 
-    return core_stream.run_stream(backend, source, settings)
+    return core_stream.run_stream(
+        backend, source, settings, started_at=started_at
+    )
 
 
 __all__ = ["handle"]

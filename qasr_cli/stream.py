@@ -273,6 +273,7 @@ def run_stream(
     *,
     clock: Optional[Callable[[], float]] = None,
     sleep: Optional[Callable[[float], None]] = None,
+    started_at: Optional[float] = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
@@ -280,7 +281,9 @@ def run_stream(
 
     Returns the process exit code. Sources are only read between chunks; on
     Ctrl-C the tail buffered by the model is still flushed and a final
-    snapshot is emitted before returning 130.
+    snapshot is emitted before returning 130. ``started_at`` lets the command
+    include model loading in ``elapsed_s``; when omitted the state machine
+    starts its own timer.
     """
     import numpy as np
 
@@ -288,7 +291,7 @@ def run_stream(
     sleep = sleep or time.sleep
     writer = SnapshotWriter(settings.emit, stdout=stdout, stderr=stderr)
 
-    started = clock()
+    started = clock() if started_at is None else started_at
     audio_sent = 0
     interrupted = False
     cap_hit = False

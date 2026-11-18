@@ -402,6 +402,41 @@ def test_realtime_sleep_subtracts_chunk_processing_time(advance, expected):
     assert sleeps == [pytest.approx(expected)]
 
 
+def test_elapsed_counts_from_started_at():
+    clock = _FakeClock()
+    clock.value = 10.0
+    settings = core_stream.StreamSettings(
+        chunk_samples=16000, chunk_ms=1000, emit="jsonl"
+    )
+    out = io.StringIO()
+    code = core_stream.run_stream(
+        FakeStreamBackend(),
+        [np.zeros(16000, dtype=np.float32)],
+        settings,
+        clock=clock,
+        started_at=2.0,
+        stdout=out,
+    )
+    lines = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert code == 0
+    assert lines[-1]["elapsed_s"] == 8.0
+
+
+def test_handle_passes_entry_timestamp(capsys, tmp_path, stream_env, monkeypatch):
+    seen = {}
+
+    def fake_run(backend, chunks, settings, **kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(core_stream, "run_stream", fake_run)
+    wav = write_wav(tmp_path / "a.wav", seconds=1.0)
+    code = main(_stream_args(wav, "--emit", "jsonl"))
+    capsys.readouterr()
+    assert code == 0
+    assert isinstance(seen.get("started_at"), float)
+
+
 @pytest.mark.parametrize(
     "args",
     [
@@ -419,6 +454,17 @@ def test_numeric_validation(capsys, tmp_path, stream_env, args):
     code = main(_stream_args(wav, *args, "--emit", "jsonl"))
     capsys.readouterr()
     assert code == 2
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "1e309"])
+def test_max_stream_seconds_must_be_finite(capsys, tmp_path, stream_env, value):
+    wav = write_wav(tmp_path / "a.wav", seconds=1.0)
+    code = main(
+        _stream_args(wav, "--max-stream-seconds", value, "--emit", "jsonl")
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "finite positive" in captured.err
 
 
 @pytest.mark.parametrize("args", [
