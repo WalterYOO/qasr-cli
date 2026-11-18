@@ -117,14 +117,14 @@ tests/
 **T2.1 传输契约**
 - 无 context：`POST {server}/v1/audio/transcriptions`，multipart 字段：
   - `file`（文件名、MIME）、`model`（服务端模型 id；默认取 `/v1/models` 首个，可 `--model` 覆盖）、`language`（ISO 码，如 `zh`；`auto` 时不传）。
-  - 响应取 `text`，语言无法从 transcription 响应可靠获得 → `language: null` + `language_source: "server"`。
+  - **2026-11-18 gpu06 实测**：vLLM 0.14.0 的 transcription 响应是 `{"text":"language Chinese<asr_text>...","usage":{...}}`，**必须解析前缀**；`language` 字段会校验非法值（`xx`→400 `Unsupported language...`），但合法值对 Qwen3-ASR 实际输出基本无影响（en/zh/yue 都返回 Chinese）。因此语言以服务端输出为准；显式 language 与输出不一致 → warning `server_ignored_language`，不得伪造成用户值。
 - 有 context：`POST {server}/v1/chat/completions`：
   - `messages[0]` 为 `system`，内容为 context 原文（多段 context 以 P0 相同规则合并）；
   - 用户消息 content 含 `{"type":"audio_url","audio_url":{"url":"data:audio/<fmt>;base64,..."}}`；
-  - 显式语言时追加 assistant prefill `language <Canonical><asr_text>` 并设 `continue_final_message: true`；服务端 400 拒绝该参数 → 去掉 prefill 重试一次，warning；
+  - **不要使用 assistant prefill / `continue_final_message`**：模型自带 chat template 只渲染 system + 音频占位，忽略 assistant 消息，prefill 会 400。chat 端点无法可靠强制语言；显式 `--language` 时给出 warning `language_not_enforced_on_chat`，语言取解析结果。
   - 响应 `choices[0].message.content` 用**本地纯函数**解析（不 import qwen_asr）：去掉 `<asr_text>`、`language X` 前缀，返回 `(language, text)`。
-- `parse_asr_output` 的本地实现放 `remote.py`，行为对齐 qwen-asr：空输出 → `("", "")`；多语言标签保留原样（如 `Chinese,English`）。
-- 如果 `/v1/audio/transcriptions` 返回 404/405（服务端未暴露该端点），回退到 chat completions（无 context 版本）一次并 warning；同一进程缓存该降级决定。
+- `parse_asr_output` 的本地实现放 `remote.py`，行为对齐 qwen-asr：空输出 → `("", "")`；多语言标签保留原样（如 `Chinese,English`）；两个端点的响应都要解析。
+- 如果 `/v1/audio/transcriptions` 返回 404/405（服务端未暴露该端点），回退到 chat completions（无 context 版本）一次并 warning；同一进程缓存该降级决定。当前 gpu06 端点存在，正常不会触发。
 - 远程 capability：`--timestamps`、`--granularity`、`align --server`、`stream`（P2）→ 退出 4，message 指明“服务端不返回时间戳/无对齐端点”。
 - 音频读取：本地路径直接 multipart/读 bytes；URL 输入先走 P0 缓存下载；`audio_base64` manifest 输入直接解码。
 - token：`Authorization: Bearer $QASR_SERVE_TOKEN`；日志与错误 details 不包含 header。
