@@ -229,13 +229,28 @@ def _reject_p1_config(config: Any) -> None:
         )
 
 
+def _silence_stdout() -> None:
+    """Point stdout at /dev/null so the interpreter's exit flush stays quiet."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
+    except OSError:
+        pass
+
+
 def _emit_error(command: str, exc: QasrError, *, json_mode: bool, quiet: bool = False) -> int:
-    if json_mode:
-        print(json.dumps(error_payload(command, exc.to_dict()), ensure_ascii=False))
-    else:
-        print(f"qasr: {exc.kind} error: {exc.message}", file=sys.stderr)
-        if exc.hint:
-            print(f"hint: {exc.hint}", file=sys.stderr)
+    try:
+        if json_mode:
+            print(json.dumps(error_payload(command, exc.to_dict()), ensure_ascii=False))
+            sys.stdout.flush()
+        else:
+            print(f"qasr: {exc.kind} error: {exc.message}", file=sys.stderr)
+            if exc.hint:
+                print(f"hint: {exc.hint}", file=sys.stderr)
+    except BrokenPipeError:
+        _silence_stdout()
+        return 0
     return exc.exit_code
 
 
@@ -262,7 +277,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _emit_error("qasr", exc, json_mode="--json" in argv and "--jsonl" not in argv)
 
     if getattr(ns, "version", False):
-        print(f"qasr {__version__}")
+        try:
+            print(f"qasr {__version__}")
+            sys.stdout.flush()
+        except BrokenPipeError:
+            _silence_stdout()
         return 0
 
     command = getattr(ns, "command", None)
@@ -307,7 +326,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise UsageError(f"unknown command: {command}")
 
         _install_signal_handlers()
-        return int(handler(ns, ctx))
+        code = int(handler(ns, ctx))
+        # Flush explicitly: under block buffering (a pipe), a closed consumer
+        # only shows up here instead of during the handler's writes.
+        sys.stdout.flush()
+        return code
     except QasrError as exc:
         return _emit_error(command, exc, json_mode=json_mode,
                            quiet=bool(getattr(ns, "quiet", False)))
@@ -317,12 +340,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except BrokenPipeError:
         # A consumer like `head` closed the pipe: this is not an error, and we
         # must silence the interpreter's final stdout flush as well.
-        try:
-            devnull = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(devnull, sys.stdout.fileno())
-            os.close(devnull)
-        except OSError:
-            pass
+        _silence_stdout()
         return 0
     except Exception as exc:  # noqa: BLE001 - last-resort error envelope
         from .errors import RuntimeFailure

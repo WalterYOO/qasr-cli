@@ -97,12 +97,15 @@ def test_align_dry_run_does_not_require_local_aligner(capsys, wav_file):
 
 
 def test_broken_pipe_exits_zero_without_traceback():
+    # Default (block) buffering: small outputs never hit the pipe until the
+    # explicit flush at the end of main(), which is what the exit flush used
+    # to surface as rc=120 plus "Exception ignored ..." noise.
     script = """
 import os, sys
 from qasr_cli.cli import main
 read_fd, write_fd = os.pipe()
 os.close(read_fd)
-sys.stdout = os.fdopen(write_fd, "w", buffering=1)
+sys.stdout = os.fdopen(write_fd, "w")
 raise SystemExit(main(["languages", "--json"]))
 """
     env = dict(os.environ)
