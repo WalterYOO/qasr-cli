@@ -6,6 +6,7 @@ from qasr_cli.render import (
     item_payload,
     render_format,
     result_payload,
+    subtitle_cues,
 )
 
 
@@ -19,6 +20,7 @@ def _result(**kwargs):
             Segment("好", 0.2, 0.4, "char"),
         ]),
         timestamp_source=kwargs.get("timestamp_source", "forced_aligner"),
+        raw_segments=kwargs.get("raw_segments", []),
     )
 
 
@@ -90,3 +92,14 @@ def test_render_srt_requires_segments():
 def test_empty_text_txt_is_empty():
     result = _result(text="")
     assert render_format("txt", item=_item(result), result=result) == ""
+
+
+def test_subtitle_cues_prefer_raw_segments():
+    result = _result(
+        segments=[Segment("你好", 0.0, 1.2, "sentence")],
+        raw_segments=[Segment("你", 0.0, 0.2, "char"),
+                      Segment("好", 1.0, 1.2, "char")],
+    )
+    cues = subtitle_cues(result, audio_duration_s=2.0)
+    # The 800 ms pause inside the sentence still splits the subtitle.
+    assert len(cues) == 2

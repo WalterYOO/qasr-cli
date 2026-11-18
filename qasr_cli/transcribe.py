@@ -167,18 +167,35 @@ def validate_output_base(value: str, fallback: str) -> str:
     return sanitize_rel_path(value, fallback=fallback)
 
 
+def _display_id(spec: ItemSpec) -> str:
+    """The identifier as the user wrote it (sanitized only for filesystem use)."""
+    return spec.item.raw_id or spec.id
+
+
 def check_output_conflicts(specs: Sequence[ItemSpec]) -> None:
-    seen: Dict[str, str] = {}
+    """Reject duplicate *final* output paths, even when ids differ.
+
+    Two raw ids such as ``a/b`` and ``a_b`` sanitize to the same file name;
+    comparing ids would silently overwrite one result with the other. Compare
+    the actual relative output path instead and report the raw ids.
+    """
+    seen: Dict[str, ItemSpec] = {}
     for spec in specs:
+        if spec.error is not None:
+            continue
         for fmt in spec.formats:
             rel = f"{spec.output_base}.{fmt}"
-            if rel in seen and seen[rel] != spec.id:
+            other = seen.get(rel)
+            if other is not None and other is not spec:
                 raise UsageError(
                     f"two inputs map to the same output file: {rel}",
                     hint="use --manifest with explicit 'output' names",
-                    details={"ids": [seen[rel], spec.id]},
+                    details={
+                        "ids": [_display_id(other), _display_id(spec)],
+                        "sources": [other.item.source, spec.item.source],
+                    },
                 )
-            seen[rel] = spec.id
+            seen[rel] = spec
 
 
 def default_output_formats(out_dir: Optional[Path], output: Optional[str]) -> List[str]:
@@ -246,7 +263,9 @@ def run(
     if max_tokens is None:
         max_tokens = max_new_tokens_for(max_duration)
 
-    check_output_conflicts(specs)
+    # Only file outputs can overwrite each other; stdout streams cannot.
+    if settings.out_dir is not None or (settings.output and settings.output != "-"):
+        check_output_conflicts(specs)
 
     # ---- dry run --------------------------------------------------------
     if settings.dry_run:
@@ -415,7 +434,11 @@ def _run_locked(
                 display_out_dir=display_out_dir,
             )
 
-    if pending:
+    # With --fail-fast, an already-failed input means nothing else will run:
+    # do not spend minutes loading weights just to break out immediately.
+    stop_early = settings.fail_fast and any(spec.error is not None for spec in specs)
+
+    if pending and not stop_early:
         try:
             backend = build_transformers_backend(
                 settings.model_path,
@@ -430,7 +453,7 @@ def _run_locked(
             ensure = getattr(backend, "ensure_loaded", None)
             started = time.perf_counter()
             if callable(ensure):
-                ensure(need_align=any(spec.timestamps for spec in pending))
+                ensure(need_align=any(spec.timestamps and not spec.empty for spec in pending))
             load_ms = int((time.perf_counter() - started) * 1000)
             log(f"model loaded in {load_ms} ms")
         except QasrError:
@@ -438,7 +461,7 @@ def _run_locked(
         except Exception as exc:
             raise RuntimeFailure(f"failed to load model: {exc}") from exc
 
-    if state_path is not None:
+    if state_path is not None and not stop_early:
         started_at = now_iso()
         for spec in pending:
             spec.started_at = started_at
@@ -476,6 +499,38 @@ def _run_locked(
         first_item = False
         if settings.fail_fast and any(spec.error for spec in group):
             break
+
+    # Fail-fast leaves later items unattempted: give them an explicit terminal
+    # state instead of leaving a stale ``running`` record behind.
+    if settings.fail_fast:
+        for spec in specs:
+            if spec.skipped or spec.error is not None or spec.result is not None:
+                continue
+            spec.skipped = True
+            spec.started_at = None
+            spec.payload = item_payload(
+                command="transcribe",
+                input_info=_input_info(spec),
+                model_info=_model_info(settings),
+                result={"text": None, "skipped": True},
+                metrics={},
+                outputs=[],
+            )
+            spec.payload["skipped"] = True
+            if state_path is not None:
+                append_jsonl(
+                    state_path,
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "id": spec.id,
+                        "job_key": spec.job_key,
+                        "status": STATUS_SKIPPED,
+                        "outputs": [],
+                        "error": None,
+                        "started_at": None,
+                        "finished_at": now_iso(),
+                    },
+                )
 
     # ---- collect -------------------------------------------------------
     for spec in specs:

@@ -22,10 +22,16 @@ Models live under `QASR_HOME/models` (macOS: `~/Library/Application Support/qasr
 ```bash
 qasr models list
 qasr models pull 0.6b --source hf
+qasr models pull 0.6b --resume          # continue a partial download
+qasr models pull 0.6b --source modelscope
 qasr models verify 0.6b
 ```
 
-Aliases: `1.7b` (default), `0.6b`, `aligner`.
+Aliases: `1.7b` (default), `0.6b`, `aligner`. `--resume` is forwarded to the
+hub downloader (legacy hubs that lack the option simply resume by default).
+After a successful pull, `models/<name>/source.json` records the repo,
+revision, source and per-file sizes. `--source modelscope` needs the optional
+`qasr-cli[modelscope]` extra.
 
 ## Quickstart
 
@@ -83,7 +89,9 @@ Priority: defaults < `QASR_HOME/config.json` < project `.qasr/config.json`
 (searched upward) < environment variables < `$QASR_CONFIG` < `--config` file
 < CLI flags. Keys: `model`, `aligner`, `backend`, `device`, `dtype`,
 `attn_implementation`, `language`, `context`, `format`, `batch_size`,
-`max_inference_batch_size`, `jobs`, `model_dir`, `offline`, `server`.
+`max_inference_batch_size`, `model_dir`, `offline`. `jobs` and `server` are
+P1 keys: a non-default value (`jobs > 1` or any `server`) is rejected with a
+usage error instead of being silently ignored.
 
 Environment: `QASR_HOME`, `QASR_MODEL`, `QASR_MODEL_DIR`, `QASR_BACKEND`,
 `QASR_DEVICE`, `QASR_DTYPE`, `QASR_OFFLINE`, `QASR_LANGUAGE`, `QASR_CONFIG`.
@@ -96,8 +104,9 @@ Environment: `QASR_HOME`, `QASR_MODEL`, `QASR_MODEL_DIR`, `QASR_BACKEND`,
 - Dialect labels are LID output only and cannot be forced.
 - English words may be glued across internal chunk boundaries (library-level).
 - Half-downloaded models are rejected by `qasr models verify`.
-- Local inference runs one job at a time (`--jobs > 1` warns and is forced to
-  1); use `--batch-size` for micro-batching.
+- Local inference runs one job at a time; use `--batch-size` for
+  micro-batching. `--jobs > 1` only warns, and `jobs > 1` in a config file is
+  rejected (parallel jobs arrive in P1).
 - Zero-sample audio succeeds with empty text and `language: null`.
 - `--jsonl` is only meaningful for `transcribe`; other commands reject it.
 

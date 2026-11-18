@@ -64,12 +64,16 @@ def _normalize_segments(segments: Sequence[Segment], audio_duration_ms: Optional
             continue
         start = max(0, to_ms(seg.start))
         end = max(start + 1, to_ms(seg.end))
-        if audio_duration_ms:
-            start = min(start, audio_duration_ms)
-            end = min(end, audio_duration_ms)
-            end = max(start + 1, end)
         start = max(start, prev_end)
-        end = max(start + 1, end)
+        if audio_duration_ms:
+            end = min(end, audio_duration_ms)
+            if start >= audio_duration_ms:
+                if prev_end >= audio_duration_ms:
+                    continue  # no room left in the audio; drop the token
+                start = audio_duration_ms - 1
+            end = min(max(end, start + 1), audio_duration_ms)
+        else:
+            end = max(start + 1, end)
         out.append(Segment(text=text, start=start, end=end, kind=seg.kind))
         prev_end = end
     return out
@@ -181,8 +185,12 @@ def build_cues(
         start = max(cue.start_ms, prev_end)
         end = max(start + 1, cue.end_ms)
         if duration_ms:
-            end = min(end, duration_ms) if end > duration_ms else end
-            end = max(start + 1, end)
+            end = min(end, duration_ms)
+            if start >= duration_ms:
+                if prev_end >= duration_ms:
+                    continue  # no room left; drop the cue
+                start = duration_ms - 1
+            end = min(max(end, start + 1), duration_ms)
         fixed.append(Cue(start_ms=start, end_ms=end, text=cue.text))
         prev_end = end
     return fixed

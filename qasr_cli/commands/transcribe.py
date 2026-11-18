@@ -85,10 +85,24 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     if granularity_default not in GRANULARITIES:
         raise UsageError(f"--granularity must be one of {GRANULARITIES}")
 
-    context_parts: List[str] = list(getattr(ns, "context", None) or [])
+    # Config-provided context is the base; CLI values are appended on top.
+    config_context = cfg.get("context") or []
+    if isinstance(config_context, str):
+        config_context = [config_context]
+    context_parts: List[str] = [str(part) for part in config_context]
+    context_parts.extend(getattr(ns, "context", None) or [])
     if getattr(ns, "context_file", None):
         context_parts.extend(_read_context_file(ns.context_file))
-    context_default = " ".join(part.strip() for part in context_parts if part.strip())
+    # Deduplicate identical fragments while preserving order: passing the same
+    # term in a config file and again on the CLI must not change the job key.
+    merged_context: List[str] = []
+    seen_context: set[str] = set()
+    for part in context_parts:
+        text = part.strip()
+        if text and text not in seen_context:
+            seen_context.add(text)
+            merged_context.append(text)
+    context_default = " ".join(merged_context)
 
     raw_language = getattr(ns, "language", None)
     if raw_language is None:
@@ -128,7 +142,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         )
         spec_errors.extend(expansion.errors)
         formats = _normalize_formats(getattr(ns, "format", None),
-                                     _default_formats_hint(ns))
+                                     _default_formats_hint(ns, cfg))
         for item in expansion.items:
             specs.append(
                 core.ItemSpec(
@@ -198,6 +212,9 @@ def handle(ns: Any, ctx: CommandContext) -> int:
             raise UsageError("--output - accepts a single input only",
                              hint="use --jsonl for multiple inputs")
         selected = specs[0].formats if specs else []
+        if len(selected) > 1:
+            raise UsageError("--output - accepts exactly one format",
+                             hint="use --out-dir for multiple formats")
         if "jsonl" in selected:
             stdout_mode = "jsonl"
         elif "json" in selected:
@@ -210,6 +227,11 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         stdout_mode = "none"
     elif total == 1:
         selected = specs[0].formats if specs else ["txt"]
+        if len(selected) > 1:
+            raise UsageError(
+                "multiple formats require --out-dir or --output",
+                hint="write files with -o DIR, or pick a single format for stdout",
+            )
         if getattr(ns, "format", None) and selected[0] in ("srt", "vtt"):
             stdout_mode = "subtitle"
         elif getattr(ns, "format", None) and selected[0] == "jsonl":
@@ -263,7 +285,11 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         require_local(model, action="transcribe")
     model_path = model.path or Path(str(model.value))
 
-    need_align = any(spec.timestamps for spec in specs)
+    # Zero-sample inputs have nothing to align: no aligner is needed for them.
+    need_align = any(
+        spec.timestamps and not (spec.info is not None and spec.info.is_empty)
+        for spec in specs
+    )
     aligner = resolve_aligner(cfg.get("aligner"), cfg, required=need_align and not ctx.dry_run) if need_align else None
     aligner_path = aligner.path if aligner is not None else None
 
@@ -340,7 +366,7 @@ def _spec_from_record(
             hint="set 'language' in the manifest record or pass --language",
         )
     formats = _normalize_formats(record.get("formats"), ["txt"]) if record.get("formats") \
-        else _normalize_formats(getattr(ns, "format", None), ["txt"])
+        else _normalize_formats(getattr(ns, "format", None) or cfg.get("format"), ["txt"])
     granularity = record.get("granularity") or granularity_default
     if granularity not in GRANULARITIES:
         raise UsageError(f"invalid granularity: {granularity}")
@@ -357,9 +383,12 @@ def _spec_from_record(
     )
 
 
-def _default_formats_hint(ns: Any) -> List[str]:
+def _default_formats_hint(ns: Any, cfg: Any) -> List[str]:
     if getattr(ns, "format", None):
         return _normalize_formats(ns.format, ["txt"])
+    configured = cfg.get("format")
+    if configured:
+        return _normalize_formats(configured, ["txt"])
     out_dir = getattr(ns, "out_dir", None)
     output = getattr(ns, "output", None)
     return core.default_output_formats(

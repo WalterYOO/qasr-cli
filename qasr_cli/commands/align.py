@@ -120,7 +120,11 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         raise UsageError("--coverage-min must be between 0 and 1")
 
     aligner = resolve_aligner(cfg.get("aligner"), cfg, required=not ctx.dry_run)
-    if aligner is None or aligner.path is None:
+    if aligner is None:
+        raise CapabilityError("no aligner model available", hint="qasr models pull aligner")
+    # Dry-run plans the resolved location/alias even when weights are absent.
+    aligner_path = aligner.path or Path(aligner.display)
+    if not ctx.dry_run and aligner.path is None:
         raise CapabilityError("no aligner model available", hint="qasr models pull aligner")
 
     device, dtype = resolve_device_dtype(cfg, optional=ctx.dry_run)
@@ -135,7 +139,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                      path=Path(str(audio)).expanduser().resolve(), origin="file")
 
     settings = core.AlignSettings(
-        aligner_path=aligner.path,
+        aligner_path=aligner_path,
         aligner_id=aligner.repo or "Qwen/Qwen3-ForcedAligner-0.6B",
         aligner_fingerprint=fingerprint,
         device=device,

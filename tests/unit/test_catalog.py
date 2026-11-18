@@ -140,3 +140,52 @@ def test_large_file_partial_fingerprint(tmp_path, monkeypatch):
     assert fp.startswith("sha256-partial:")
     full = catalog.fingerprint_file(target, full=True)
     assert full.startswith("sha256:")
+
+
+def _fake_hub(monkeypatch, *, accept_resume=True):
+    import sys
+    import types
+
+    calls = []
+
+    def snapshot_download(*, repo_id, local_dir, **kwargs):
+        calls.append({"repo_id": repo_id, "local_dir": local_dir, "kwargs": kwargs})
+        if kwargs.get("resume_download") and not accept_resume:
+            raise TypeError("unexpected keyword argument 'resume_download'")
+        dest = __import__("pathlib").Path(local_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "config.json").write_text("{}", encoding="utf-8")
+        (dest / "model.safetensors").write_bytes(b"\0" * 32)
+
+    hub = types.ModuleType("huggingface_hub")
+    hub.snapshot_download = snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    return calls
+
+
+def test_pull_model_resume_writes_source_json(monkeypatch):
+    import json
+    import pathlib
+
+    from qasr_cli.catalog import pull_model
+
+    calls = _fake_hub(monkeypatch)
+    payload = pull_model("0.6b", revision="v1", resume=True)
+    assert calls[0]["kwargs"]["resume_download"] is True
+    dest = pathlib.Path(payload["path"])
+    source = json.loads((dest / "source.json").read_text(encoding="utf-8"))
+    assert source["repo"] == "Qwen/Qwen3-ASR-0.6B"
+    assert source["revision"] == "v1"
+    assert source["source"] == "hf"
+    files = {entry["path"]: entry["size"] for entry in source["files"]}
+    assert files["model.safetensors"] == 32
+    assert source["total_size"] == sum(files.values())
+
+
+def test_pull_model_resume_falls_back_when_unsupported(monkeypatch):
+    from qasr_cli.catalog import pull_model
+
+    calls = _fake_hub(monkeypatch, accept_resume=False)
+    pull_model("0.6b", resume=True)
+    assert len(calls) == 2
+    assert "resume_download" not in calls[1]["kwargs"]

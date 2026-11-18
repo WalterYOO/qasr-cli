@@ -118,7 +118,10 @@ def batch_payload(
 
 
 def subtitle_cues(result: TranscribeResult, audio_duration_s: Optional[float]) -> List[Cue]:
-    return build_cues(result.segments, audio_duration_s=audio_duration_s)
+    # Prefer token-level items so cue splitting keeps intra-sentence pauses
+    # even when JSON segments were aggregated to sentence granularity.
+    segments = getattr(result, "raw_segments", None) or result.segments
+    return build_cues(segments, audio_duration_s=audio_duration_s)
 
 
 def render_format(

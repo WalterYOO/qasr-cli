@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import sys
 from typing import Any, Dict, Optional, Sequence
@@ -19,7 +20,6 @@ from .commands.common import CommandContext
 from .config import load_config
 from .errors import (
     EXIT_INTERRUPT,
-    EXIT_MODEL,
     EXIT_USAGE,
     QasrError,
     UsageError,
@@ -214,6 +214,21 @@ def _collect_overrides(ns: argparse.Namespace) -> Dict[str, Any]:
     return overrides
 
 
+def _reject_p1_config(config: Any) -> None:
+    """Fail loudly on configuration keys that only P1 implements."""
+    if config.get("server"):
+        raise UsageError(
+            "remote server mode is not available in P0",
+            hint="remove 'server' from the config file (P1 adds --server)",
+        )
+    jobs = config.get("jobs")
+    if jobs is not None and int(jobs) != 1:
+        raise UsageError(
+            f"jobs={jobs} from configuration is not available in P0",
+            hint="remove 'jobs' from the config file; use --batch-size",
+        )
+
+
 def _emit_error(command: str, exc: QasrError, *, json_mode: bool, quiet: bool = False) -> int:
     if json_mode:
         print(json.dumps(error_payload(command, exc.to_dict()), ensure_ascii=False))
@@ -277,6 +292,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             getattr(ns, "config", None),
             cli_overrides=_collect_overrides(ns),
         )
+        _reject_p1_config(config)
         ctx = CommandContext(
             config=config,
             json_mode=json_mode,
@@ -299,7 +315,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("qasr: interrupted", file=sys.stderr)
         return EXIT_INTERRUPT
     except BrokenPipeError:
-        return EXIT_MODEL
+        # A consumer like `head` closed the pipe: this is not an error, and we
+        # must silence the interpreter's final stdout flush as well.
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            os.close(devnull)
+        except OSError:
+            pass
+        return 0
     except Exception as exc:  # noqa: BLE001 - last-resort error envelope
         from .errors import RuntimeFailure
 

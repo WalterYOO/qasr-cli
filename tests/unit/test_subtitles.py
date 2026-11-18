@@ -94,3 +94,19 @@ def test_parse_srt_roundtrip():
     cues = parse_srt(original)
     assert [cue.text for cue in cues] == ["你好", "再见"]
     assert cues[1].start_ms == 1500
+
+
+def test_cue_end_never_exceeds_audio_duration():
+    segments = [seg("好", 0.0, 1.0009)]
+    cues = build_cues(segments, audio_duration_s=1.0)
+    assert cues
+    assert cues[-1].end_ms <= 1000
+    assert cues[-1].end_ms >= cues[-1].start_ms + 1
+
+
+def test_cue_starting_at_end_of_audio_is_clamped():
+    segments = [seg("甲", 0.0, 0.5), seg("乙", 1.0002, 1.5)]
+    cues = build_cues(segments, audio_duration_s=1.0)
+    assert cues
+    assert all(cue.end_ms <= 1000 for cue in cues)
+    assert all(cue.end_ms >= cue.start_ms + 1 for cue in cues)

@@ -94,6 +94,8 @@ class TranscribeResult:
     timestamp_source: Optional[str] = None
     text_transform: str = TEXT_TRANSFORM
     warnings: List[str] = field(default_factory=list)
+    # Token/word level items before sentence aggregation (used for subtitles).
+    raw_segments: List[Segment] = field(default_factory=list)
 
 
 @dataclass
@@ -146,6 +148,47 @@ def _split_token(text: str, start: float, end: float) -> List[Segment]:
         s = start + step * i
         e = start + step * (i + 1)
         out.append(Segment(text=ch, start=s, end=e, kind="char"))
+    return out
+
+
+SENTENCE_END = set("。！？!?；;…")
+SENTENCE_PAUSE_MS = 700
+
+
+def _join_segments(group: Sequence[Segment]) -> str:
+    text = ""
+    for seg in group:
+        piece = seg.text
+        if not piece:
+            continue
+        if text and not (_is_cjk_char(text[-1]) or _is_cjk_char(piece[0])):
+            text += " "
+        text += piece
+    return text
+
+
+def aggregate_sentences(segments: Sequence[Segment]) -> List[Segment]:
+    """Group token items into sentence segments (punctuation or >=700ms pause)."""
+    out: List[Segment] = []
+    current: List[Segment] = []
+
+    def flush() -> None:
+        nonlocal current
+        if not current:
+            return
+        text = _join_segments(current).strip()
+        if text:
+            out.append(Segment(text=text, start=current[0].start,
+                               end=max(seg.end for seg in current), kind="sentence"))
+        current = []
+
+    for seg in segments:
+        if current and (seg.start - current[-1].end) * 1000.0 >= SENTENCE_PAUSE_MS:
+            flush()
+        current.append(seg)
+        if seg.text and seg.text[-1] in SENTENCE_END:
+            flush()
+    flush()
     return out
 
 
@@ -311,6 +354,9 @@ class TransformersBackend(_BaseTransformersModel):
                 getattr(raw, "time_stamps", None) if need_align else None,
                 opts.granularity,
             )
+            raw_segments = list(segments)
+            if opts.granularity == "sentence" and segments:
+                segments = aggregate_sentences(segments)
             warnings: List[str] = []
             if need_align and text and not segments:
                 warnings.append("timestamps were requested but the aligner returned no items")
@@ -322,6 +368,7 @@ class TransformersBackend(_BaseTransformersModel):
                     segments=segments,
                     timestamp_source="forced_aligner" if segments else None,
                     warnings=warnings,
+                    raw_segments=raw_segments,
                 )
             )
         return results

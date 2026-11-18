@@ -258,3 +258,144 @@ def test_output_conflict_between_items(tmp_path):
 
     with pytest.raises(UsageError, match="same output file"):
         core.check_output_conflicts([a, b])
+
+
+def test_fail_fast_leaves_no_running_items(monkeypatch, tmp_path, model_dir):
+    a = write_wav(tmp_path / "a.wav")
+    b = write_wav(tmp_path / "b.wav", freq=660.0)
+    c = write_wav(tmp_path / "c.wav", freq=880.0)
+    backend = FakeBackend(fail_ids={"b"})
+    _patch_backend(monkeypatch, backend)
+    out = tmp_path / "out"
+
+    result = core.run(
+        _settings(model_dir, stdout_mode="json", out_dir=out, formats=["txt"],
+                  batch_size=1, fail_fast=True),
+        [_spec(a), _spec(b), _spec(c)],
+    )
+    payload = json.loads(result.stdout)
+    assert result.exit_code == EXIT_PARTIAL
+    assert payload["summary"] == {"total": 3, "ok": 1, "failed": 1, "skipped": 1}
+    assert result.summary == payload["summary"]
+
+    records = [
+        json.loads(line)
+        for line in (out / ".qasr" / "state.jsonl").read_text().splitlines()
+    ]
+    latest = {record["id"]: record for record in records}
+    assert all(record["status"] != "running" for record in latest.values())
+    assert latest["a"]["status"] == "done"
+    assert latest["b"]["status"] == "failed"
+    assert latest["c"]["status"] == "skipped"
+    # The unattempted item never reached the backend.
+    assert "text-c" not in result.stdout
+
+
+def test_fail_fast_preflight_failure_does_not_load_backend(monkeypatch, tmp_path, model_dir):
+    from qasr_cli.errors import InputError
+
+    good = write_wav(tmp_path / "good.wav")
+    bad = tmp_path / "bad.wav"
+    bad.write_bytes(b"not audio")
+    built = []
+
+    def _build(*args, **kwargs):
+        built.append(True)
+        return FakeBackend()
+
+    monkeypatch.setattr(core, "build_transformers_backend", _build)
+    broken = _spec(bad)
+    broken.error = InputError("cannot read audio")
+    result = core.run(
+        _settings(model_dir, stdout_mode="json", fail_fast=True),
+        [broken, _spec(good)],
+    )
+    assert built == []
+    payload = json.loads(result.stdout)
+    assert payload["summary"] == {"total": 2, "ok": 0, "failed": 1, "skipped": 1}
+
+
+def test_output_conflict_reports_raw_ids(tmp_path):
+    from qasr_cli.errors import UsageError
+
+    a = write_wav(tmp_path / "a.wav")
+    b = write_wav(tmp_path / "b.wav", freq=880.0)
+    first = core.ItemSpec(
+        item=InputItem(id="a_b", source=str(a), path=a, raw_id="a/b"),
+        language="Chinese", formats=["txt"], output_base="a_b",
+    )
+    second = core.ItemSpec(
+        item=InputItem(id="a_b", source=str(b), path=b, raw_id="a_b"),
+        language="Chinese", formats=["txt"], output_base="a_b",
+    )
+    with pytest.raises(UsageError) as excinfo:
+        core.check_output_conflicts([first, second])
+    assert excinfo.value.details["ids"] == ["a/b", "a_b"]
+    assert "a_b.txt" in excinfo.value.message
+
+
+def test_sentence_aggregation_splits_on_punctuation_and_pause():
+    from qasr_cli.backends import aggregate_sentences
+
+    segments = [
+        Segment("你", 0.0, 0.2, "char"),
+        Segment("好", 0.2, 0.4, "char"),
+        Segment("。", 0.4, 0.5, "char"),
+        Segment("再", 2.0, 2.2, "char"),
+        Segment("见", 2.2, 2.4, "char"),
+    ]
+    sentences = aggregate_sentences(segments)
+    assert [item.text for item in sentences] == ["你好。", "再见"]
+    assert all(item.kind == "sentence" for item in sentences)
+    assert sentences[0].start == 0.0 and sentences[0].end == 0.5
+
+
+class _RawTimestamp:
+    def __init__(self, text, start, end):
+        self.text = text
+        self.start_time = start
+        self.end_time = end
+
+
+class _RawResult:
+    def __init__(self, text, items):
+        self.text = text
+        self.language = "Chinese"
+        self.time_stamps = type("TS", (), {"items": items})()
+
+
+class _FakeASR:
+    def transcribe(self, **kwargs):
+        items = [
+            _RawTimestamp("你", 0.0, 0.2),
+            _RawTimestamp("好", 0.2, 0.4),
+            _RawTimestamp("。", 0.4, 0.5),
+            _RawTimestamp("再", 2.0, 2.2),
+            _RawTimestamp("见", 2.2, 2.4),
+        ]
+        return [_RawResult("你好。再见", items)]
+
+
+def test_backend_sentence_granularity_aggregates_json_segments(monkeypatch, tmp_path):
+    from qasr_cli.audio import AudioInfo
+    from qasr_cli.backends import (
+        TranscribeJob,
+        TranscribeOptions,
+        TransformersBackend,
+    )
+
+    backend = TransformersBackend(tmp_path, aligner_path=tmp_path / "aligner")
+    backend._asr = _FakeASR()
+    monkeypatch.setattr(backend, "ensure_loaded", lambda need_align=False: None)
+    wav = write_wav(tmp_path / "a.wav")
+    job = TranscribeJob(
+        item=InputItem(id="a", source=str(wav), path=wav),
+        info=AudioInfo(path=wav, duration_s=3.0, sample_rate=16000,
+                       channels=1, frames=48000),
+        language="Chinese",
+    )
+    result = backend.transcribe(
+        [job], TranscribeOptions(timestamps=True, granularity="sentence")
+    )[0]
+    assert [seg.text for seg in result.segments] == ["你好。", "再见"]
+    assert len(result.raw_segments) == 5

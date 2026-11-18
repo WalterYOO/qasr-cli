@@ -78,6 +78,19 @@ def test_transcribe_timestamps_srt(capsys, tmp_path):
     assert "-->" in srt
     payload = json.loads((out / "qasr_asr_zh.json").read_text(encoding="utf-8"))
     assert payload["result"]["timestamp_source"] == "forced_aligner"
+    # JSON defaults to sentence granularity; subtitles keep token-level cues.
+    segments = payload["result"]["segments"]
+    assert segments and all(seg["kind"] == "sentence" for seg in segments)
+    assert srt.count("-->") >= 1
+
+
+def test_transcribe_word_granularity_keeps_tokens(capsys):
+    _require_assets()
+    code = main(["transcribe", str(AUDIO), "--model-dir", str(MODEL_ROOT),
+                 "--model", "0.6b", "--language", "zh", "--timestamps",
+                 "--granularity", "word", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload
     assert len(payload["result"]["segments"]) >= 13
 
 

@@ -37,6 +37,7 @@ class InputItem:
     rel_path: Optional[str] = None
     url: Optional[str] = None
     base64_data: Optional[str] = None
+    raw_id: Optional[str] = None  # id as written by the user (manifest/CLI)
     origin: str = "file"  # file | dir | glob | url | manifest | base64
 
     def to_plan(self) -> Dict[str, Any]:
@@ -205,9 +206,10 @@ def make_url_item(url: str, *, offline: bool = False, dry_run: bool = False) -> 
     if dry_run:
         # Plan only: the deterministic cache path, no network access.
         return InputItem(id=item_id, source=url, path=url_cache_path(url),
-                         rel_path=None, url=url, origin="url")
+                         rel_path=None, url=url, raw_id=item_id, origin="url")
     path = download_url(url, offline=offline)
-    return InputItem(id=item_id, source=url, path=path, rel_path=None, url=url, origin="url")
+    return InputItem(id=item_id, source=url, path=path, rel_path=None, url=url,
+                     raw_id=item_id, origin="url")
 
 
 def make_base64_item(data: str, item_id: Optional[str] = None) -> InputItem:
@@ -233,6 +235,7 @@ def make_base64_item(data: str, item_id: Optional[str] = None) -> InputItem:
         path=target,
         rel_path=None,
         base64_data=None,
+        raw_id=str(item_id) if item_id else digest[:12],
         origin="base64",
     )
 
@@ -284,13 +287,15 @@ def expand_inputs(
                 continue
             for path in files:
                 item_id, rel = _default_id_for_path(path, expanded)
+                raw = Path(rel).with_suffix("").as_posix() if rel else path.stem
                 add(InputItem(id=item_id, source=str(path), path=path.resolve(),
-                              rel_path=rel, origin="dir"))
+                              rel_path=rel, raw_id=raw, origin="dir"))
             continue
 
         if expanded.is_file():
             item_id, _ = _default_id_for_path(expanded, None)
-            add(InputItem(id=item_id, source=spec, path=expanded.resolve(), origin="file"))
+            add(InputItem(id=item_id, source=spec, path=expanded.resolve(),
+                          raw_id=expanded.stem, origin="file"))
             continue
 
         if GLOB_CHARS.search(spec):
@@ -302,7 +307,8 @@ def expand_inputs(
                 continue
             for path in matches:
                 item_id, _ = _default_id_for_path(path, None)
-                add(InputItem(id=item_id, source=str(path), path=path.resolve(), origin="glob"))
+                add(InputItem(id=item_id, source=str(path), path=path.resolve(),
+                              raw_id=path.stem, origin="glob"))
             continue
 
         result.errors.append(
@@ -350,6 +356,7 @@ def resolve_manifest_audio(
         id=sanitize_id(item_id) if item_id else sanitize_id(path.stem),
         source=audio,
         path=path.resolve(),
+        raw_id=str(item_id) if item_id else path.stem,
         origin="manifest",
     )
     return item

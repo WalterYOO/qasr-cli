@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from .. import catalog
-from ..errors import EXIT_MODEL, EXIT_OK, ModelError
+from ..errors import EXIT_MODEL, EXIT_OK, ModelError, UsageError
 from .common import CommandContext
 
 
@@ -29,9 +29,13 @@ def handle(ns: Any, ctx: CommandContext) -> int:
             print(f"{entry['alias']:8} {state:10} {size_text:>10}  {entry['path'] or entry['repo']}")
         return EXIT_OK
 
+    if action is None:
+        raise UsageError("models requires an action",
+                         hint="list | path | verify | pull")
+
     target = getattr(ns, "model_target", None)
     if not target:
-        raise ModelError("a model alias is required", hint="1.7b | 0.6b | aligner")
+        raise UsageError("a model alias is required", hint="1.7b | 0.6b | aligner")
 
     if action == "path":
         payload = catalog.models_path(target, ctx.config)
@@ -61,6 +65,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
             source=str(getattr(ns, "source", None) or "hf"),
             revision=getattr(ns, "revision", None),
             offline=bool(ctx.config.get("offline")),
+            resume=bool(getattr(ns, "resume", False)),
         )
         if ctx.json_mode:
             _emit(payload, ctx)

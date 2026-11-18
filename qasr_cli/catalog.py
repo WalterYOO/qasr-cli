@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import SCHEMA_VERSION
-from .config import Config, models_root, qasr_home
+from .config import Config, models_root, qasr_home, write_json_atomic
 from .errors import InputError, ModelError
+from .jobs import now_iso
 
 PULL_HINT = "qasr models pull {alias} --resume"
 
@@ -496,12 +497,45 @@ def models_list(config: Optional[Config] = None, cwd: Optional[Path] = None) -> 
     }
 
 
+def _snapshot_download(fn: Any, *args: Any, resume: bool, **kwargs: Any) -> Any:
+    """Call ``snapshot_download`` with resume where the library supports it."""
+    if resume:
+        try:
+            return fn(*args, resume_download=True, **kwargs)
+        except TypeError:
+            # Older hub releases dropped resume_download (always resuming).
+            pass
+    return fn(*args, **kwargs)
+
+
+def _write_source_json(dest: Path, *, repo: str, revision: Optional[str],
+                       source: str) -> None:
+    """Record where the weights came from (repo/revision/files/sizes)."""
+    files: List[Dict[str, Any]] = []
+    for path in sorted(dest.rglob("*")):
+        if path.is_file() and path.name != "source.json":
+            files.append({
+                "path": path.relative_to(dest).as_posix(),
+                "size": path.stat().st_size,
+            })
+    payload = {
+        "repo": repo,
+        "revision": revision,
+        "source": source,
+        "files": files,
+        "total_size": sum(item["size"] for item in files),
+        "created_at": now_iso(),
+    }
+    write_json_atomic(dest / "source.json", payload)
+
+
 def pull_model(
     value: str,
     *,
     source: str = "hf",
     revision: Optional[str] = None,
     offline: bool = False,
+    resume: bool = False,
 ) -> Dict[str, Any]:
     spec = spec_for(value)
     if spec is None:
@@ -523,7 +557,8 @@ def pull_model(
                     "huggingface_hub is not installed",
                     hint='uv pip install "qasr-cli[hf]"  (or use --source modelscope)',
                 ) from exc
-            snapshot_download(repo_id=spec.repo, local_dir=str(dest), **kwargs)
+            _snapshot_download(snapshot_download, repo_id=spec.repo,
+                               local_dir=str(dest), resume=resume, **kwargs)
         elif source == "modelscope":
             try:
                 from modelscope import snapshot_download as ms_download
@@ -532,7 +567,8 @@ def pull_model(
                     "modelscope is not installed",
                     hint='uv pip install "qasr-cli[modelscope]"',
                 ) from exc
-            ms_download(spec.repo, local_dir=str(dest), **kwargs)
+            _snapshot_download(ms_download, spec.repo, local_dir=str(dest),
+                               resume=resume, **kwargs)
         else:
             raise InputError(f"unknown --source: {source}", hint="use hf or modelscope")
     except (ModelError, InputError):
@@ -541,6 +577,10 @@ def pull_model(
         raise ModelError(f"download failed for {spec.repo}: {exc}",
                          hint=PULL_HINT.format(alias=spec.alias)) from exc
 
+    try:
+        _write_source_json(dest, repo=spec.repo, revision=revision, source=source)
+    except OSError:
+        pass  # metadata is best-effort; the weights are what matter
     resolved = ResolvedModel(value=value, alias=spec.alias, repo=spec.repo,
                              path=dest.resolve(), source="pull", kind=spec.kind)
     verify = verify_model(resolved)
