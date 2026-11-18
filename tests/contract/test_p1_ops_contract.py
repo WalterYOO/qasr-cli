@@ -103,6 +103,55 @@ def test_bench_dry_run_schema(capsys):
     assert payload["plan"]["duration_s"] == 2.0
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--duration", "0"],
+        ["--duration", "-1"],
+        ["--iterations", "0"],
+        ["--iterations", "101"],
+    ],
+)
+def test_bench_rejects_zero_and_out_of_range(capsys, args):
+    code = main([
+        "--device", "cpu", "--dtype", "fp32",
+        "bench", "--dry-run", "--json", *args,
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2, payload
+
+
+def test_bench_remote_warning_reaches_stderr(capsys, monkeypatch):
+    import qasr_cli.remote as remote_mod
+
+    class FakeRemote:
+        resolved_model_id = "served"
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def prepare(self):
+            return None
+
+        def transcribe(self, jobs, opts):
+            return [
+                TranscribeResult(
+                    text="x", language="English", language_source="auto", segments=[]
+                )
+                for _ in jobs
+            ]
+
+    monkeypatch.setattr(remote_mod, "RemoteBackend", FakeRemote)
+    code = main([
+        "--server", "http://127.0.0.1:18000",
+        "bench", "--json", "--duration", "0.1", "--iterations", "1",
+    ])
+    captured = capsys.readouterr()
+    assert code == 0, captured
+    assert "network time" in captured.err
+    assert "network time" in json.loads(captured.out)["warnings"][0]
+
+
 def test_bench_synthetic_json(capsys, model_factory, monkeypatch):
     model_factory("Qwen3-ASR-1.7B")
     import qasr_cli.commands.bench as bench_cmd

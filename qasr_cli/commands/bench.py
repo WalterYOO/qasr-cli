@@ -52,10 +52,12 @@ def _synthetic(duration: float, directory: Path) -> tuple[Path, AudioInfo]:
 
 def handle(ns: Any, ctx: CommandContext) -> int:
     cfg = ctx.config
-    duration = float(getattr(ns, "duration", None) or 10.0)
+    raw_duration = getattr(ns, "duration", None)
+    duration = 10.0 if raw_duration is None else float(raw_duration)
     if duration <= 0:
         raise UsageError("--duration must be > 0")
-    iterations = int(getattr(ns, "iterations", None) or 3)
+    raw_iterations = getattr(ns, "iterations", None)
+    iterations = 3 if raw_iterations is None else int(raw_iterations)
     if not 1 <= iterations <= 100:
         raise UsageError("--iterations must be between 1 and 100")
 
@@ -137,6 +139,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
             backend.prepare()
             model_id = getattr(backend, "resolved_model_id", None) or model_id
             warnings.append("bench includes network time in RTF")
+            ctx.warn("bench includes network time in RTF")
         else:
             require_local(model, action="bench")
             model_path = model.path or Path(str(model.value))
