@@ -84,11 +84,18 @@ def _normalize_formats(value: Any, default: Sequence[str]) -> List[str]:
 def handle(ns: Any, ctx: CommandContext) -> int:
     cfg = ctx.config
     is_remote = selected_backend(cfg) == "remote"
-    backend_choice, backend_fallback = resolve_backend(cfg)
-    if backend_choice == "vllm":
-        from ..runtime import require_vllm, set_cuda_visible_device
+    # CUDA_VISIBLE_DEVICES must be written before resolve_backend() probes
+    # CUDA (vllm_probe imports torch, which initializes it); setting it later
+    # would select the wrong GPU under --backend auto.
+    requested_backend = selected_backend(cfg)
+    if requested_backend in ("auto", "vllm"):
+        from ..runtime import set_cuda_visible_device
 
         set_cuda_visible_device(str(cfg.get("device") or "auto"))
+    backend_choice, backend_fallback = resolve_backend(cfg)
+    if backend_choice == "vllm":
+        from ..runtime import require_vllm
+
         require_vllm()
 
     if getattr(ns, "manifest", None) and getattr(ns, "inputs", None):

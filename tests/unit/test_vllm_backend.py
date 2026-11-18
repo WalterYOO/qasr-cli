@@ -300,3 +300,74 @@ def test_auto_and_plain_cuda_do_not_touch_visible_devices(monkeypatch, tmp_path)
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "3"
     VLLMBackend(tmp_path, device="cuda")
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "3"
+
+
+def test_explicit_cuda_zero_selects_device_and_rewrites(monkeypatch, tmp_path):
+    _install_fakes(monkeypatch)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+    backend = VLLMBackend(tmp_path, device="cuda:0")
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
+    assert backend.requested_device == "cuda:0"
+
+
+def test_set_cuda_visible_device_is_idempotent(monkeypatch):
+    from qasr_cli.runtime import set_cuda_visible_device
+
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    assert set_cuda_visible_device("cuda:0") == "0"
+    assert set_cuda_visible_device("cuda:0") == "0"
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
+
+
+def test_auto_sets_cuda_visible_devices_before_probing(monkeypatch, tmp_path):
+    seen = {}
+
+    def _probe():
+        seen["env"] = os.environ.get("CUDA_VISIBLE_DEVICES")
+        return False, False
+
+    monkeypatch.setattr("qasr_cli.runtime.vllm_probe", _probe)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    wav = write_wav(tmp_path / "a.wav")
+    main(["--backend", "auto", "--device", "cuda:1", "--dry-run", "transcribe", str(wav), "--json"])
+    assert seen["env"] == "1"
+
+
+def test_vllm_logging_env_and_handler_redirect(monkeypatch):
+    import logging
+
+    from qasr_cli import runtime
+
+    monkeypatch.delenv("VLLM_CONFIGURE_LOGGING", raising=False)
+    runtime.configure_vllm_logging()
+    assert os.environ["VLLM_CONFIGURE_LOGGING"] == "0"
+
+    logger = logging.getLogger("vllm.engine")
+    handler = logging.StreamHandler(sys.stdout)
+    logger.addHandler(handler)
+    try:
+        runtime.redirect_vllm_logging()
+        assert handler.stream is sys.stderr
+    finally:
+        logger.removeHandler(handler)
+
+
+def test_vllm_exit_noise_goes_to_stderr(monkeypatch, capsys):
+    import json
+
+    from qasr_cli import runtime
+
+    monkeypatch.setattr(runtime, "_STDOUT_EXIT_GUARD", False)
+    registered = []
+    monkeypatch.setattr(runtime.atexit, "register", registered.append)
+    monkeypatch.setattr(runtime.os, "dup2", lambda *args: None)
+    runtime.guard_stdout_at_exit()
+    runtime.guard_stdout_at_exit()  # idempotent
+    assert len(registered) == 1
+
+    print(json.dumps({"ok": True}))
+    registered[0]()  # runs before earlier (vLLM) atexit handlers
+    print("EngineCore shutdown")
+    captured = capsys.readouterr()
+    assert captured.out.strip() == json.dumps({"ok": True})
+    assert "EngineCore shutdown" in captured.err

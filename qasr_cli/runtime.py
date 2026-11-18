@@ -7,6 +7,7 @@ happen inside functions, and ``--offline`` environment variables are set
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import importlib
 import os
@@ -161,6 +162,58 @@ def torch_dtype(name: str, torch_mod: Any = None) -> Any:
         raise ModelError(f"unknown dtype: {name}") from exc
 
 
+def configure_vllm_logging() -> None:
+    """Keep vLLM from configuring its own stdout logging handlers.
+
+    Must run before ``import vllm``; otherwise EngineCore banners and shutdown
+    messages are written to stdout and corrupt ``--json`` output.
+    """
+    os.environ.setdefault("VLLM_CONFIGURE_LOGGING", "0")
+
+
+_STDOUT_EXIT_GUARD = False
+
+
+def guard_stdout_at_exit() -> None:
+    """Redirect fd 1 to stderr during interpreter shutdown.
+
+    vLLM's EngineCore spawns background threads whose atexit logging would
+    otherwise append text after the single JSON line qasr prints.
+    """
+    global _STDOUT_EXIT_GUARD
+    if _STDOUT_EXIT_GUARD:
+        return
+    _STDOUT_EXIT_GUARD = True
+
+    def _guard() -> None:
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        try:
+            os.dup2(2, 1)
+        except OSError:
+            pass
+        sys.stdout = sys.stderr
+
+    atexit.register(_guard)
+
+
+def redirect_vllm_logging() -> None:
+    """Point any vLLM StreamHandler bound to stdout at stderr instead."""
+    import logging
+
+    for name in list(logging.root.manager.loggerDict):
+        if name != "vllm" and not name.startswith("vllm."):
+            continue
+        logger = logging.getLogger(name)
+        for handler in logger.handlers:
+            if isinstance(handler, logging.StreamHandler) and getattr(
+                handler, "stream", None
+            ) is sys.stdout:
+                handler.setStream(sys.stderr)
+
+
 def vllm_probe() -> tuple[bool, bool]:
     """Best-effort ``(available, attempted)`` check for the auto backend.
 
@@ -176,7 +229,9 @@ def vllm_probe() -> tuple[bool, bool]:
     except Exception:
         return False, False
     try:
-        importlib.import_module("vllm")
+        configure_vllm_logging()
+        with stdout_to_stderr():
+            importlib.import_module("vllm")
         return True, False
     except Exception:
         return False, True
@@ -195,13 +250,16 @@ def require_vllm() -> None:
             "the vLLM backend requires CUDA, but CUDA is not available",
             hint=f"use --backend transformers; {VLLM_HINT}",
         )
+    configure_vllm_logging()
     try:
-        importlib.import_module("vllm")
+        with stdout_to_stderr():
+            importlib.import_module("vllm")
     except Exception as exc:
         raise RuntimeFailure(
             f"vllm is not importable: {exc}",
             hint=VLLM_HINT,
         ) from exc
+    redirect_vllm_logging()
 
 
 def set_cuda_visible_device(requested: str) -> Optional[str]:
@@ -215,7 +273,9 @@ def set_cuda_visible_device(requested: str) -> Optional[str]:
     if match is None:
         return None
     index = int(match.group(1))
-    if index <= 0:
-        return None
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(index)
-    return str(index)
+    value = str(index)
+    # Idempotent: the CLI calls this before probing and the backend calls it
+    # again in __init__; an unchanged value must not be rewritten.
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != value:
+        os.environ["CUDA_VISIBLE_DEVICES"] = value
+    return value

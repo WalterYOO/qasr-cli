@@ -16,8 +16,11 @@ from .errors import CapabilityError, ModelError, RuntimeFailure
 from .inputs import InputItem
 from .runtime import (
     configure_offline,
+    configure_vllm_logging,
+    guard_stdout_at_exit,
     import_qwen_asr,
     import_torch,
+    redirect_vllm_logging,
     require_vllm,
     resolve_device,
     resolve_dtype,
@@ -450,7 +453,11 @@ class VLLMBackend(_BaseTransformersModel):
         self._prepare()
         if self._asr is None:
             configure_offline(self.offline)
-            qwen_asr = import_qwen_asr()
+            configure_vllm_logging()
+            with stdout_to_stderr():
+                qwen_asr = import_qwen_asr()
+            redirect_vllm_logging()
+            guard_stdout_at_exit()
             use_aligner = need_align and self.aligner_path is not None
             with stdout_to_stderr():
                 self._asr = qwen_asr.Qwen3ASRModel.LLM(
@@ -476,7 +483,9 @@ class VLLMBackend(_BaseTransformersModel):
         if self._aligner is not None:
             return
         self._prepare()
-        qwen_asr = import_qwen_asr()
+        with stdout_to_stderr():
+            qwen_asr = import_qwen_asr()
+        redirect_vllm_logging()
         aligner_source = self.aligner_path or self.model_path
         with stdout_to_stderr():
             self._aligner = qwen_asr.Qwen3ForcedAligner.from_pretrained(
