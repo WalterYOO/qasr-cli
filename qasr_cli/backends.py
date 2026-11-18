@@ -21,6 +21,7 @@ from .runtime import (
     require_vllm,
     resolve_device,
     resolve_dtype,
+    set_cuda_visible_device,
     stdout_to_stderr,
     torch_dtype,
 )
@@ -411,6 +412,11 @@ class VLLMBackend(_BaseTransformersModel):
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
+        # Device remapping must happen before torch initializes CUDA. Doing it
+        # in __init__ is the earliest backend-level hook; the CLI also calls
+        # this before its vLLM availability probe.
+        if set_cuda_visible_device(self.requested_device) is not None:
+            self.requested_device = "cuda:0"
         self.gpu_memory_utilization = gpu_memory_utilization
         self._asr: Any = None
         self._aligner: Any = None
@@ -423,10 +429,12 @@ class VLLMBackend(_BaseTransformersModel):
                 "the vLLM backend requires a CUDA device",
                 hint="use --backend transformers for MPS/CPU",
             )
+        # vLLM selects the device via CUDA_VISIBLE_DEVICES; indexed devices
+        # were remapped in __init__ to the single visible GPU (cuda:0).
 
     def _engine_kwargs(self) -> Dict[str, Any]:
         dtype = {"fp32": "float32", "fp16": "float16", "bf16": "bfloat16"}[str(self.dtype)]
-        kwargs: Dict[str, Any] = {"device": self.device, "dtype": dtype}
+        kwargs: Dict[str, Any] = {"dtype": dtype}
         if self.gpu_memory_utilization is not None:
             kwargs["gpu_memory_utilization"] = float(self.gpu_memory_utilization)
         return kwargs

@@ -11,6 +11,7 @@ import contextlib
 import importlib
 import os
 import platform
+import re
 import sys
 from typing import Any, Dict, Iterator, Optional
 
@@ -201,3 +202,20 @@ def require_vllm() -> None:
             f"vllm is not importable: {exc}",
             hint=VLLM_HINT,
         ) from exc
+
+
+def set_cuda_visible_device(requested: str) -> Optional[str]:
+    """Honor an explicit ``--device cuda:N`` before torch/vLLM are imported.
+
+    vLLM's EngineArgs has no ``device`` kwarg; device selection happens through
+    ``CUDA_VISIBLE_DEVICES``. Must run before importing torch, otherwise CUDA
+    has already initialized. Returns the visible index as a string when set.
+    """
+    match = re.fullmatch(r"cuda:(\d+)", str(requested or "").strip())
+    if match is None:
+        return None
+    index = int(match.group(1))
+    if index <= 0:
+        return None
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(index)
+    return str(index)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 from pathlib import Path
@@ -123,7 +124,7 @@ def test_vllm_constructor_kwargs_and_batch(monkeypatch, tmp_path):
     )
     kwargs = _FakeQwen.last_kwargs
     assert _FakeQwen.last_model == str(tmp_path.resolve())
-    assert kwargs["device"] == "cuda:1"
+    assert "device" not in kwargs
     assert kwargs["dtype"] == "float16"
     assert kwargs["max_inference_batch_size"] == 8
     assert kwargs["max_new_tokens"] == 256
@@ -280,3 +281,22 @@ def test_doctor_reports_auto_backend_resolution(capsys):
     check = next(item for item in payload["checks"] if item["name"] == "backend")
     assert check["value"]["selected"] == "auto"
     assert check["value"]["resolved"] == "transformers"
+
+
+def test_cuda_index_sets_visible_device_before_import(monkeypatch, tmp_path):
+    _install_fakes(monkeypatch)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    backend = VLLMBackend(tmp_path, device="cuda:7")
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "7"
+    assert backend.requested_device == "cuda:0"
+    backend.ensure_loaded()
+    assert "device" not in _FakeQwen.last_kwargs
+
+
+def test_auto_and_plain_cuda_do_not_touch_visible_devices(monkeypatch, tmp_path):
+    _install_fakes(monkeypatch)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+    VLLMBackend(tmp_path, device="auto")
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "3"
+    VLLMBackend(tmp_path, device="cuda")
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "3"

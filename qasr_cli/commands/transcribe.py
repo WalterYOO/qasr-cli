@@ -86,8 +86,9 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     is_remote = selected_backend(cfg) == "remote"
     backend_choice, backend_fallback = resolve_backend(cfg)
     if backend_choice == "vllm":
-        from ..runtime import require_vllm
+        from ..runtime import require_vllm, set_cuda_visible_device
 
+        set_cuda_visible_device(str(cfg.get("device") or "auto"))
         require_vllm()
 
     if getattr(ns, "manifest", None) and getattr(ns, "inputs", None):

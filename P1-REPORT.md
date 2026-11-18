@@ -105,9 +105,12 @@ transcription 404/405 降级后）就产生 `language_not_enforced_on_chat`；
 
 ### 4.11 vLLM 后端与 auto 选择
 
-- `VLLMBackend` 通过 `Qwen3ASRModel.LLM(...)` 懒加载，参数含 `device`、`dtype`
+- `VLLMBackend` 通过 `Qwen3ASRModel.LLM(...)` 懒加载，参数含 `dtype`
   （fp32/fp16/bf16 → vLLM 字符串）、`gpu_memory_utilization`、`max_new_tokens`、
-  `max_inference_batch_size`。`--timestamps` 时把 forced aligner 一并传入，时间戳
+  `max_inference_batch_size`。vLLM 0.14 的 `EngineArgs` 不接受 `device`，因此
+  不传；显式 `--device cuda:N`（N>0）在 import torch/vllm **之前**写入
+  `CUDA_VISIBLE_DEVICES=N`（覆盖已有值，显式优先），并把内部请求设备改写为
+  `cuda:0`；`auto`/`cuda` 不改环境变量。`--timestamps` 时把 forced aligner 一并传入，时间戳
   仍由 HF aligner 产生；`align` 命令同样复用 HF aligner。
 - 显式 `--backend vllm` 在非 Linux/无 CUDA/无 vllm 时可导入性检查失败 → 退出 3，
   hint 指向 `qasr-cli[vllm]`；不会静默回退。
@@ -126,6 +129,8 @@ transcription 404/405 降级后）就产生 `language_not_enforced_on_chat`；
   取消排队任务并由收尾阶段补 skipped，不留下 running 记录。
 - 远程单文件 >25MB 仍直接拒绝；客户端切块（默认 270s）在 N4 接入。
 - vLLM 真机验收（gpu06）由协调者安排；本地只做假模块单测，未操作服务器。
+- `forced_aligner_kwargs` 中的 `dtype=torch.dtype` 在 qwen-asr 0.0.6 真机
+  timestamps 路径仍待 gpu06 复核（走 HF AutoModel 参数，理论上接受）。
 - 远程 RTF 含网络时间，仅作记录，不作门禁。
 - `QASR_SERVE_TOKEN` 只从环境变量读取；不写入配置、state、jobs 或日志。
 
