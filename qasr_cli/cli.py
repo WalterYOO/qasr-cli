@@ -16,6 +16,7 @@ from .commands import bench as bench_cmd
 from .commands import completion as completion_cmd
 from .commands import config as config_cmd
 from .commands import doctor as doctor_cmd
+from .commands import finetune as finetune_cmd
 from .commands import jobs as jobs_cmd
 from .commands import languages as languages_cmd
 from .commands import models as models_cmd
@@ -46,6 +47,7 @@ COMMAND_HANDLERS = {
     "bench": bench_cmd.handle,
     "stream": stream_cmd.handle,
     "completion": completion_cmd.handle,
+    "finetune": finetune_cmd.handle,
 }
 
 CLI_CONFIG_KEYS = (
@@ -283,6 +285,24 @@ def _add_completion(sub: argparse._SubParsersAction) -> None:
                    metavar="bash|zsh|fish")
 
 
+def _add_finetune(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "finetune",
+        help="validate fine-tuning inputs (no training)",
+        description="Utilities for the official Qwen3-ASR SFT JSONL format.",
+    )
+    finetune_sub = p.add_subparsers(dest="finetune_command", metavar="<action>")
+    lp = finetune_sub.add_parser(
+        "lint-jsonl", help="validate an SFT JSONL file line by line"
+    )
+    _add_common_flags(lp)
+    lp.add_argument("jsonl_path", metavar="FILE")
+    lp.add_argument("--strict", action="store_true", default=False,
+                    help="treat warnings (unknown fields, duplicate audio) as errors")
+    lp.add_argument("--no-check-files", dest="no_check_files", action="store_true",
+                    default=False, help="skip audio existence/readability checks")
+
+
 def _add_doctor(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("doctor", help="check the local runtime and models")
     _add_common_flags(p)
@@ -343,6 +363,7 @@ def build_parser() -> QasrParser:
     _add_bench(sub)
     _add_stream(sub)
     _add_completion(sub)
+    _add_finetune(sub)
     return parser
 
 

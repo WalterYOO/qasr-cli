@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/finetune-lint.json",
+  "title": "qasr finetune lint-jsonl",
+  "type": "object",
+  "required": [
+    "schema_version", "ok", "command", "action", "path",
+    "total", "valid", "errors", "warnings"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"const": "finetune"},
+    "action": {"const": "lint-jsonl"},
+    "path": {"type": "string"},
+    "total": {"type": "integer", "minimum": 0},
+    "valid": {"type": "integer", "minimum": 0},
+    "errors": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/issue"}
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/issue"}
+    }
+  },
+  "$defs": {
+    "issue": {
+      "type": "object",
+      "required": ["line", "field", "message"],
+      "properties": {
+        "line": {"type": "integer", "minimum": 1},
+        "field": {"type": "string"},
+        "message": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
