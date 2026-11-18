@@ -494,6 +494,35 @@ class VLLMBackend(_BaseTransformersModel):
             )
             self._aligner.model.to(self.device)
 
+    # ---- streaming (P2) -------------------------------------------------
+    def init_streaming_state(
+        self,
+        *,
+        context: str = "",
+        language: Optional[str] = None,
+        unfixed_chunk_num: int = 2,
+        unfixed_token_num: int = 5,
+        chunk_size_sec: float = 2.0,
+    ) -> Any:
+        """Create one streaming state; streaming is vLLM-only and single-stream."""
+        self.ensure_loaded()
+        with stdout_to_stderr():
+            return self._asr.init_streaming_state(
+                context=context,
+                language=language,
+                unfixed_chunk_num=unfixed_chunk_num,
+                unfixed_token_num=unfixed_token_num,
+                chunk_size_sec=chunk_size_sec,
+            )
+
+    def streaming_transcribe(self, pcm16k: Any, state: Any) -> Any:
+        with stdout_to_stderr():
+            return self._asr.streaming_transcribe(pcm16k, state)
+
+    def finish_streaming_transcribe(self, state: Any) -> Any:
+        with stdout_to_stderr():
+            return self._asr.finish_streaming_transcribe(state)
+
     def transcribe(self, jobs: Sequence[TranscribeJob], opts: TranscribeOptions) -> List[TranscribeResult]:
         if not jobs:
             return []

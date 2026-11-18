@@ -19,6 +19,7 @@ from .commands import jobs as jobs_cmd
 from .commands import languages as languages_cmd
 from .commands import models as models_cmd
 from .commands import serve as serve_cmd
+from .commands import stream as stream_cmd
 from .commands import transcribe as transcribe_cmd
 from .commands.common import CommandContext
 from .config import load_config
@@ -42,6 +43,7 @@ COMMAND_HANDLERS = {
     "serve": serve_cmd.handle,
     "jobs": jobs_cmd.handle,
     "bench": bench_cmd.handle,
+    "stream": stream_cmd.handle,
 }
 
 CLI_CONFIG_KEYS = (
@@ -234,6 +236,40 @@ def _add_bench(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--iterations", type=int, default=3, metavar="N")
 
 
+def _add_stream(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "stream",
+        help="stream audio through vLLM with cumulative snapshots",
+        description=(
+            "Stream one file, raw PCM on stdin, or the microphone through a "
+            "local vLLM backend. Requires Linux + CUDA + qwen-asr[vllm]."
+        ),
+    )
+    _add_common_flags(p)
+    p.add_argument("--input", required=True, metavar="mic|stdin|FILE",
+                   help="audio source (mic, stdin, or one local file)")
+    p.add_argument("--pcm", choices=["s16le"], default=argparse.SUPPRESS,
+                   help="stdin PCM encoding (only s16le is supported)")
+    p.add_argument("--sample-rate", dest="sample_rate", type=int,
+                   default=argparse.SUPPRESS)
+    p.add_argument("--channels", type=int, default=argparse.SUPPRESS,
+                   choices=[1, 2])
+    p.add_argument("--chunk-ms", dest="chunk_ms", type=int, default=2000,
+                   help="decode chunk size in milliseconds (100-10000)")
+    p.add_argument("--unfixed-chunks", dest="unfixed_chunks", type=int, default=2)
+    p.add_argument("--unfixed-tokens", dest="unfixed_tokens", type=int, default=5)
+    p.add_argument("--max-stream-seconds", dest="max_stream_seconds", type=float,
+                   default=3600.0)
+    p.add_argument("--emit", choices=["text", "jsonl"], default="text")
+    p.add_argument("--realtime", action="store_true", default=False,
+                   help="pace file input in wall-clock time")
+    p.add_argument("-l", "--language", metavar="auto|zh|en|...", default=None)
+    context = p.add_mutually_exclusive_group()
+    context.add_argument("--context", action="append", default=[], metavar="TEXT")
+    context.add_argument("--context-file", dest="context_file", metavar="PATH",
+                         default=None)
+
+
 def _add_doctor(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("doctor", help="check the local runtime and models")
     _add_common_flags(p)
@@ -292,6 +328,7 @@ def build_parser() -> QasrParser:
     _add_config(sub)
     _add_jobs(sub)
     _add_bench(sub)
+    _add_stream(sub)
     return parser
 
 
@@ -398,7 +435,9 @@ def _split_serve_tail(tail: Sequence[str]) -> tuple[Optional[str], list[str], li
 
 def _validate_backend(config: Any, command: str) -> None:
     """Reconcile ``--server`` with ``--backend``; reject an unbound remote."""
-    if command == "serve":
+    if command in ("serve", "stream"):
+        # Both commands own their backend compatibility rules (stream turns
+        # remote/explicit transformers into capability errors).
         return
     backend = str(config.get("backend") or "auto").strip().lower()
     server = config.get("server")

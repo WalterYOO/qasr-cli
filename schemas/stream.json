@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/stream.json",
+  "title": "qasr stream snapshot",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "seq", "is_final"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"const": "stream"},
+    "seq": {"type": "integer", "minimum": 0},
+    "audio_s": {"type": "number", "minimum": 0},
+    "elapsed_s": {"type": "number", "minimum": 0},
+    "language": {"type": ["string", "null"]},
+    "text": {"type": "string"},
+    "is_final": {"type": "boolean"},
+    "error": {
+      "type": "object",
+      "required": ["kind", "code", "message", "retryable", "details"],
+      "properties": {
+        "kind": {"type": "string"},
+        "code": {"type": "integer"},
+        "message": {"type": "string"},
+        "retryable": {"type": "boolean"},
+        "details": {"type": "object"},
+        "hint": {"type": "string"}
+      },
+      "additionalProperties": true
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {"ok": {"const": true}},
+      "required": ["audio_s", "elapsed_s", "language", "text"]
+    },
+    {
+      "properties": {"ok": {"const": false}, "is_final": {"const": true}},
+      "required": ["error"]
+    }
+  ],
+  "additionalProperties": false
+}
