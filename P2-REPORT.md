@@ -20,7 +20,8 @@
 | `f21de70` | `feat(completion): generate bash, zsh and fish scripts from argparse` |
 | `67be093` | `fix(stream): account processing time in realtime pacing` |
 | `077a223` | `feat(finetune): add lint-jsonl SFT data validator` |
-| 本报告所在 commit | `docs(p2): packaging, README and implementation report` |
+| `26dcc66` | `docs(p2): packaging, README and implementation report` |
+| `ac526bb` | `fix(stream): precheck microphone support before model loading` |
 
 每个功能 commit 自带测试；`67be093` 同时把显式 `--backend vllm` 不可用时的
 hint 统一为 `uv tool install "qasr-cli[vllm,mic]"`。
@@ -98,23 +99,33 @@ UV_HTTP_TIMEOUT=300 uv run --no-sync pytest -q review_tests_p1
 5. **fish 覆盖断言**：除 `complete -c qasr -l <opt>` 外，脚本行尾注释中列出
    长选项字面量，确保覆盖测试对三类 shell 使用同一断言方式。
 6. **`--dry-run` + stream**：明确拒绝 → 2，避免“干跑流式”的歧义。
-7. **mic 错误分类**：`sounddevice` 缺失 → 4（capability）；设备打开/读取
-   失败 → 3（model/runtime）。
+7. **mic 错误分类与顺序**：`sounddevice` 缺失在 `--input mic` 确定后立即
+   预检 → 4（capability），早于模型解析和 vLLM 加载；设备打开/读取失败仍在
+   采集时按 3（model/runtime）处理。
 8. **text 模式**：TTY 用 `\r` 覆盖并最终换行；非 TTY 只在结束时打印最终文本。
 
 ## 6. gpu06 验收（协调者执行）
 
-本机不连接、不传输文件到 gpu06。以下项目由协调者在 gpu06 上执行，结果以
-协调者记录为准；本报告不预填未产生的证据：
+本机不连接、不传输文件到 gpu06。以下证据由协调者在 gpu06（HEAD `26dcc66`）
+执行并提供：
 
-- `stream --input file.wav --emit jsonl`：seq 连续、最终 `is_final=true`、
-  文本非空、stdout 每行合法 JSON。
-- `stream --input stdin --pcm s16le` 与 file 输入语义一致。
-- `--language` / `--context` 生效。
-- `--max-stream-seconds` 小于音频时长：最终 quality 快照后退出 5。
-- Ctrl-C：最终快照 + 130，无半行 JSON。
-- 显式 `--backend transformers` / `--server` → 4；无 `sounddevice` 时
-  `--input mic` → 4。
+- **file 200s**：rc0，101 行，`seq` 0..100，`is_final` 仅一次；最终
+  `audio_s=200.0`，elapsed 28.99s，English，text 2703 字符。
+- **stdin s16le 同一音频**：rc0，101 行，`seq`/final 语义相同，
+  `audio_s=200.0`，English，text 与 file 输入完全一致（2703 字符）。
+- **cap=5s**：rc5；2 条 `ok:true` 非最终快照 + 1 条
+  `ok:false`/`quality`/`is_final` 快照（`seq=2`）。
+- **SIGINT**：tmux C-c → rc130；9 行，最后 `seq=8` 为 `ok:true`/`is_final`，
+  `audio_s=16.0`，无半行 JSON。
+- **能力边界**：显式 `--backend transformers`、`--server` → rc4，消息与
+  hint 正确。
+- **中文 4.2s**：`--language zh` + context + `--chunk-ms 1000 --realtime`
+  → rc0，5 行，`seq`/`audio_s` 单调，`language=Chinese`，最终文本与 P1 一致，
+  elapsed 6.4s。
+- **mic（无 sounddevice，util 0.3）**：rc4 + mic hint；首轮验收发现当时是在
+  vLLM 引擎加载（约 60s）后才报错。`ac526bb` 已把 sounddevice 预检前移到
+  `resolve_model`/`ensure_loaded` 之前，待协调者在 gpu06 复验应无 vLLM
+  引擎日志。
 
 ## 7. 限制
 
@@ -127,5 +138,6 @@ UV_HTTP_TIMEOUT=300 uv run --no-sync pytest -q review_tests_p1
 
 ## 8. 结论
 
-P2 三项功能与打包/文档均已实现，默认测试与既有 review 套件通过；gpu06
-vLLM 黑盒验收待协调者执行。
+P2 三项功能与打包/文档均已实现，默认测试与既有 review 套件通过。gpu06
+vLLM 黑盒验收已由协调者完成 file/stdin/cap/SIGINT/能力边界/中文场景；
+mic 预检顺序问题已由 `ac526bb` 修复，等待 gpu06 复验。
