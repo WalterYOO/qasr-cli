@@ -24,7 +24,7 @@ qasr transcribe 1h.flac --timestamps --language zh --max-chunk-seconds 180 -f sr
 qasr align 1h.flac --text-file transcript.txt --language zh -f srt -o out
 
 # 4) 运维：高级批量与状态查询
-qasr transcribe --stdin-list paths.txt --skip-existing --retry --out-dir out --resume
+qasr transcribe --stdin-list --skip-existing --retry --out-dir out --resume < paths.txt
 qasr jobs list --json ; qasr jobs show <id> --json
 qasr bench sample.wav --iterations 3 --json
 qasr models show 1.7b --json ; qasr models rm 0.6b --yes
@@ -236,7 +236,7 @@ tests/
 ### N5 — 高级批量、运维与完整验收
 
 **T5.1 输入与重跑**
-- `--stdin-list`：从 stdin 读路径，每行一个；空行跳过；`-` 不再是路径；与 `--manifest` 互斥；与位置参数可并存（stdin 在前/位置参数在后，稳定排序去重）。
+- `--stdin-list`：**无参数**，从 stdin 读路径，每行一个；空行跳过；`-` 不再是路径；与 `--manifest` 互斥；与位置参数可并存（stdin 在前/位置参数在后，稳定排序去重）。需要从文件读时用 shell 重定向 `< paths.txt`。
 - `--skip-existing`：目标输出全部存在且非空 → `skipped`，不加载模型；与 `--resume` 可同用（先 skip-existing 再 job_key 判定）；JSON 计数不并入 ok（沿用 P0 修正）。
 - `--retry`：对 `error.retryable == true` 的失败项重跑一次；仅一次，记录 `attempts`；与 `--fail-fast` 互斥（用法错误）。
 - `--continue-on-error` 默认不变；部分失败退出 6。
@@ -244,7 +244,7 @@ tests/
 **T5.2 输出格式 `tsv` / `md`**
 - `tsv`：表头 `id	start	end	text	language`；无时间戳时 start/end 为空；每段一行（有 segments）；字段内 tab/换行转义为空格；UTF-8。
 - `md`：每个 item 一个 `## <id>` 节；有 segments 时列表 `- [start - end] text`，否则正文；批量时按输入顺序。
-- 两种格式同样支持 stdout 单条与 `--out-dir` 批量；与 `--json/--jsonl` 的互斥规则不变。
+- 两种格式同样支持 stdout 单条与 `--out-dir` 批量；`--format tsv|md` 与其他文件格式一样，与 `--json/--jsonl` **无条件互斥**（退出 2）。
 - 更新 `render.py`/输出扩展名映射与 README。
 
 **T5.3 `jobs list` / `jobs show`**
