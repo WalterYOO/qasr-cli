@@ -9,6 +9,8 @@ import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import jsonschema
+
 from qasr_cli import serve as serve_core
 from qasr_cli.cli import main
 from qasr_cli.remote import probe_server, redact_url
@@ -243,7 +245,7 @@ def test_backend_remote_requires_server(capsys):
 
 
 def test_server_userinfo_is_redacted(capsys):
-    code = main(["doctor", "--server", "http://alice:s3cret@127.0.0.1:9", "--json"])
+    code = main(["doctor", "--server", "http://user:fake@127.0.0.1:9", "--json"])
     out = capsys.readouterr()
     assert code == 0
     payload = json.loads(out.out)
@@ -285,7 +287,7 @@ def test_redirect_chain_is_capped(monkeypatch):
 
 
 def test_redact_url_masks_userinfo_and_sensitive_query():
-    assert redact_url("http://alice:pw@host:8000/v1?x=1") == "http://host:8000/v1?x=1"
+    assert redact_url("http://user:fake@host:8000/v1?x=1") == "http://host:8000/v1?x=1"
     redacted = redact_url("http://host/v1?token=abc&x=1")
     assert "abc" not in redacted
     assert "token=%2A%2A%2A" in redacted or "token=***" in redacted
@@ -301,3 +303,80 @@ def test_serve_known_flag_after_unknown_value_keeps_model(capsys):
     assert payload["model"] == "1.7b"
     assert "--host" in payload["argv"] and "0.0.0.0" in payload["argv"]
     assert payload["argv"][-2:] == ["--tensor-parallel-size", "2"]
+
+
+def test_server_userinfo_is_stripped_before_request(capsys):
+    with fake_server() as (url, handler):
+        decorated = url.replace("http://", "http://user:fake@")
+        code = main(["doctor", "--server", decorated, "--json"])
+    out = capsys.readouterr()
+    assert code == 0, out.err
+    payload = json.loads(out.out)
+    check = next(item for item in payload["checks"] if item["name"] == "server")
+    assert check["status"] == "ok"
+    assert check["value"]["url"] == url
+    assert "pass@" not in out.out
+    assert handler.requests == ["/v1/models"]
+
+
+def test_doctor_server_value_has_machine_fields(capsys):
+    with fake_server() as (url, _handler):
+        assert main(["doctor", "--server", url, "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+    check = next(item for item in payload["checks"] if item["name"] == "server")
+    assert check["value"]["http_status"] == 200
+    assert check["value"]["auth_rejected"] is False
+    assert check["value"]["reachable"] is True
+    assert check["value"]["timed_out"] is False
+
+
+def test_doctor_invalid_port_is_a_failed_check_not_a_crash(capsys):
+    code = main(["doctor", "--server", "http://127.0.0.1:99999", "--json"])
+    out = capsys.readouterr()
+    assert code == 0
+    payload = json.loads(out.out)
+    check = next(item for item in payload["checks"] if item["name"] == "server")
+    assert check["status"] == "fail"
+    assert check["value"]["url"] == "<invalid-url>"
+    assert "internal" not in out.out.casefold()
+
+
+def test_serve_rejects_gpu_memory_utilization_out_of_range(capsys):
+    assert main(["serve", "0.6b", "--gpu-memory-utilization", "2", "--dry-run",
+                 "--json"]) == 2
+    out = capsys.readouterr()
+    assert json.loads(out.out)["error"]["kind"] == "usage"
+
+
+def test_serve_rejects_aligner_model(capsys):
+    assert main(["serve", "aligner", "--dry-run", "--json"]) == 2
+    out = capsys.readouterr()
+    assert "ASR model" in json.loads(out.out)["error"]["hint"]
+
+
+def test_serve_backfills_model_after_unknown_flag(capsys):
+    payload = _serve_payload(
+        capsys,
+        ["serve", "--tensor-parallel-size", "2", "0.6b", "--dry-run", "--json"],
+    )
+    assert payload["model"] == "0.6b"
+    assert payload["argv"][1] == "Qwen/Qwen3-ASR-0.6B"
+    assert payload["argv"][-2:] == ["--tensor-parallel-size", "2"]
+
+
+def test_serve_dry_run_matches_schema(capsys):
+    payload = _serve_payload(capsys, ["serve", "0.6b", "--dry-run", "--json"])
+    schema = json.loads(
+        (pathlib.Path(__file__).resolve().parents[2] / "schemas" / "serve.json")
+        .read_text(encoding="utf-8")
+    )
+    jsonschema.validate(payload, schema)
+
+
+def test_config_show_redacts_server_userinfo(capsys):
+    assert main(["--server", "http://user:fake@127.0.0.1:9", "config", "show",
+                 "--json"]) == 0
+    out = capsys.readouterr()
+    payload = json.loads(out.out)
+    assert payload["config"]["server"]["value"] == "http://127.0.0.1:9"
+    assert "pass@" not in out.out

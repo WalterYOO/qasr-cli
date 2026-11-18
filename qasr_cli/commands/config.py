@@ -35,7 +35,15 @@ def handle(ns: Any, ctx: CommandContext) -> int:
             print(str(path))
         return EXIT_OK
 
-    # config show
+    # config show: never print URL userinfo or token-like query values.
+    from ..remote import redact_url
+
+    display_config = {}
+    for key, entry in ctx.config.resolved().items():
+        entry = dict(entry)
+        if key == "server" and isinstance(entry.get("value"), str) and entry["value"]:
+            entry["value"] = redact_url(entry["value"])
+        display_config[key] = entry
     payload = {
         "schema_version": SCHEMA_VERSION,
         "ok": True,
@@ -43,7 +51,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         "action": "show",
         "home": str(qasr_home()),
         "files": ctx.config.files,
-        "config": ctx.config.resolved(),
+        "config": display_config,
     }
     if ctx.json_mode:
         ctx.emit(json.dumps(payload, ensure_ascii=False))

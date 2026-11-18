@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/serve.json",
+  "title": "qasr serve dry-run plan",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "argv", "binary", "model", "resolved", "source"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"const": "serve"},
+    "argv": {"type": "array", "items": {"type": "string"}},
+    "binary": {"type": "string"},
+    "model": {"type": "string"},
+    "resolved": {"type": "string"},
+    "source": {"enum": ["local", "repo"]},
+    "path": {"type": ["string", "null"]},
+    "repo": {"type": ["string", "null"]}
+  },
+  "additionalProperties": true
+}

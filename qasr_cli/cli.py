@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import sys
+from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 from . import __version__
@@ -185,7 +186,15 @@ def _add_languages(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_serve(sub: argparse._SubParsersAction) -> None:
-    p = sub.add_parser("serve", help="start qwen-asr-serve for remote clients")
+    p = sub.add_parser(
+        "serve",
+        help="start qwen-asr-serve for remote clients",
+        description=(
+            "Start an OpenAI-compatible server. MODEL (alias or path) must "
+            "come before any unknown qwen-asr-serve flags; unknown flags are "
+            "forwarded verbatim."
+        ),
+    )
     _add_common_flags(p)
     p.add_argument("model_target", nargs="?", metavar="MODEL", default=None)
     p.add_argument("--host", default=None)
@@ -313,6 +322,16 @@ def _split_serve_tail(tail: Sequence[str]) -> tuple[Optional[str], list[str], li
             continue
         if model is None and not seen_unknown:
             model = token
+        elif model is None:
+            # qwen-asr-serve flags may precede MODEL. Backfill only when the
+            # bare token is a known qasr model alias or an existing path, so
+            # flag values such as ``2`` still belong to the unknown flag.
+            from .catalog import spec_for
+
+            if spec_for(token) is not None or Path(token).expanduser().exists():
+                model = token
+            else:
+                passthrough.append(token)
         else:
             passthrough.append(token)
         index += 1

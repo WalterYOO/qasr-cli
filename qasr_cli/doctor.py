@@ -256,14 +256,22 @@ def _check_server(server: str) -> Dict[str, Any]:
         "latency_ms": info["latency_ms"],
         "models": info["models"],
         "token_set": info["token_set"],
+        "reachable": info["reachable"],
+        "http_status": info["http_status"],
+        "auth_rejected": info["auth_rejected"],
+        "timed_out": info["timed_out"],
     }
     if not info["reachable"]:
         hint = ("check the host/port, the SSH tunnel, and the server process")
         return _check("server", "fail", value, str(info.get("error") or "unreachable"), hint)
     status = info.get("http_status") or 0
     if info["auth_rejected"]:
-        return _check("server", "warn", value, f"HTTP {status} (auth rejected)",
-                      "set QASR_SERVE_TOKEN in the environment")
+        hint = (
+            "QASR_SERVE_TOKEN is set but the server rejected it"
+            if info["token_set"]
+            else "set QASR_SERVE_TOKEN in the environment"
+        )
+        return _check("server", "warn", value, f"HTTP {status} (auth rejected)", hint)
     if status >= 500:
         return _check("server", "fail", value, f"HTTP {status}", "server returned an error; check its logs")
     if status >= 400:

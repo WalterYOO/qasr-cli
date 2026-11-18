@@ -43,37 +43,56 @@ def redact_url(url: str) -> str:
     text = str(url or "")
     try:
         parsed = urllib.parse.urlsplit(text)
+        host = parsed.hostname or ""
+        port = parsed.port  # raises ValueError for an invalid port
+        if parsed.username is not None or parsed.password is not None:
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            if port is not None:
+                host += f":{port}"
+        else:
+            host = parsed.netloc
+        query = parsed.query
+        if query:
+            pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+            if any(_SENSITIVE_QUERY.search(key) for key, _ in pairs):
+                query = urllib.parse.urlencode(
+                    [(key, "***" if _SENSITIVE_QUERY.search(key) else value)
+                     for key, value in pairs]
+                )
+        return urllib.parse.urlunsplit(
+            (parsed.scheme, host, parsed.path, query, parsed.fragment)
+        )
     except ValueError:
         return "<invalid-url>"
-    host = parsed.hostname or ""
-    if parsed.username is not None or parsed.password is not None:
-        if parsed.port:
-            host += f":{parsed.port}"
-    else:
-        host = parsed.netloc
-    query = parsed.query
-    if query:
-        pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
-        if any(_SENSITIVE_QUERY.search(key) for key, _ in pairs):
-            query = urllib.parse.urlencode(
-                [(key, "***" if _SENSITIVE_QUERY.search(key) else value)
-                 for key, value in pairs]
-            )
-    return urllib.parse.urlunsplit(
-        (parsed.scheme, host, parsed.path, query, parsed.fragment)
-    )
 
 
 def normalize_base_url(url: str) -> str:
-    """Validate an http(s) base URL and strip the trailing slash."""
+    """Validate an http(s) base URL, strip userinfo and the trailing slash.
+
+    Userinfo cannot be sent by ``urllib`` ``Request`` (it would end up in the
+    Host header); credentials travel only via ``QASR_SERVE_TOKEN``.
+    """
     text = str(url or "").strip()
-    parsed = urllib.parse.urlparse(text)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+    try:
+        parsed = urllib.parse.urlsplit(text)
+        port = parsed.port
+    except ValueError as exc:
+        raise UsageError(
+            f"invalid server URL: {redact_url(text)!r}",
+            hint="expected http://host:port or https://host",
+        ) from exc
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise UsageError(
             f"invalid server URL: {redact_url(text)!r}",
             hint="expected http://host:port or https://host",
         )
-    return text.rstrip("/")
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host if port is None else f"{host}:{port}"
+    path = parsed.path.rstrip("/")
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, path, "", ""))
 
 
 def _origin(url: str) -> tuple[str, str, Optional[int]]:

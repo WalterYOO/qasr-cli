@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .catalog import ResolvedModel, resolve_model, verify_model
 from .config import Config
-from .errors import ModelError
+from .errors import ModelError, UsageError
 
 SERVE_BINARY = "qwen-asr-serve"
 INSTALL_HINT = (
@@ -84,6 +84,16 @@ def build_plan(
     binary: Optional[str] = None,
 ) -> ServePlan:
     resolved = resolve_serve_model(model, config)
+    if resolved.kind != "asr":
+        raise UsageError(
+            f"cannot serve a {resolved.kind} model: {resolved.display}",
+            hint="qwen-asr-serve needs an ASR model (1.7b/0.6b)",
+        )
+    if gpu_memory_utilization is not None:
+        value = float(gpu_memory_utilization)
+        if not 0.0 < value <= 1.0:
+            raise UsageError("--gpu-memory-utilization must be in (0, 1]")
+        gpu_memory_utilization = value
     if resolved.path is not None:
         model_arg = str(resolved.path)
         source = "local"
