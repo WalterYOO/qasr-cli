@@ -221,19 +221,36 @@ def attribute_reference(
             spans.append(TextSpan(index, _offset_at(offsets, cursor, len(ref_text)),
                                   _offset_at(offsets, cursor, len(ref_text)), 0.0))
             continue
+        # Match against a bounded candidate slice so a long remaining
+        # reference does not let the longest block jump far ahead.
+        window_len = len(window_norm)
+        remaining = len(norm_ref) - cursor
+        k = min(max(window_len * 3 + 200, window_len), remaining)
         matcher = difflib.SequenceMatcher(
-            None, norm_ref[cursor:], window_norm, autojunk=False
+            None, norm_ref[cursor:cursor + k], window_norm, autojunk=False
         )
-        match = matcher.find_longest_match(0, len(norm_ref) - cursor, 0, len(window_norm))
-        if match.size <= 0:
+        blocks = [block for block in matcher.get_matching_blocks() if block.size > 0]
+        # Keep a chain that advances through the window monotonically: repeated
+        # reference phrases produce several blocks mapped to the same window
+        # offset, and only the first occurrence belongs to this window.
+        chain: List[Any] = []
+        window_end = 0
+        for block in blocks:
+            if block.b >= window_end:
+                chain.append(block)
+                window_end = block.b + block.size
+        if not chain:
             position = _offset_at(offsets, cursor, len(ref_text))
             spans.append(TextSpan(index, position, position, 0.0))
             continue
-        ref_start_norm = cursor + match.a
-        ref_end_norm = ref_start_norm + match.size
+        # Own everything between the first and last matching block. Small
+        # substitutions/insertions inside that range belong to this window.
+        ref_start_norm = cursor + chain[0].a
+        ref_end_norm = cursor + chain[-1].a + chain[-1].size
+        matched = sum(block.size for block in chain)
+        ratio = min(1.0, matched / max(1, window_len))
         start_char = offsets[ref_start_norm]
         end_char = offsets[ref_end_norm - 1] + 1
-        ratio = match.size / max(1, len(window_norm))
         spans.append(
             TextSpan(
                 index,

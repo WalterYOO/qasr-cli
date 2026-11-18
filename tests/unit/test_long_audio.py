@@ -160,3 +160,38 @@ def test_plain_chunking_can_exceed_alignment_window_cap():
         assert window.audio_end_sample - window.audio_start_sample <= 270 * SR
     with pytest.raises(UsageError):
         plan_windows(600 * SR, SR, window_s=270)
+
+
+def test_attribute_reference_tolerates_small_differences():
+    ref = "This is a LibriVox recording of a public domain book read by a volunteer"
+    window = "this is a librivox recording of a public domain books read by volunteers"
+    span = attribute_reference(ref, [window])[0]
+    assert span.match_ratio > 0.8
+    assert span.text.startswith("This is a LibriVox")
+    assert span.text.endswith("volunteer")
+
+
+def test_attribute_reference_keeps_middle_substitutions():
+    ref = "alpha beta gamma delta epsilon zeta"
+    window = "alpha beta omega delta epsilon"
+    span = attribute_reference(ref, [window])[0]
+    assert span.text == "alpha beta gamma delta epsilon"
+    assert span.match_ratio > 0.8
+
+
+def test_attribute_reference_ignores_leading_and_trailing_window_noise():
+    ref = "alpha beta gamma delta"
+    spans = attribute_reference(ref, ["uh alpha beta", "gamma delta um"])
+    assert spans[0].text == "alpha beta"
+    assert spans[1].text == "gamma delta"
+    assert spans[0].match_ratio > 0.8
+    assert spans[1].match_ratio > 0.8
+
+
+def test_attribute_reference_covers_window_spanning_two_sentences():
+    ref = "the quick brown fox jumps over the lazy dog"
+    window = "the quick brown fox jumps over the lazy dog"
+    span = attribute_reference(ref, [window])[0]
+    assert span.start_char == 0
+    assert span.end_char == len(ref)
+    assert span.match_ratio == 1.0
