@@ -100,7 +100,8 @@ tests/
 
 **T1.2 远程配置与 `doctor --server`**
 - 全局 `--server URL`，优先级：CLI > `QASR_SERVE_URL` > 配置 `server`；隐含 `backend=remote` 且与显式 `--backend transformers|vllm` 冲突时退出 2。
-- `QASR_SERVE_TOKEN` **只从环境变量读**；不写入 config、不打印、不落到 manifest/JSON/日志；doctor 只报告“token 已设置/未设置”。
+- `QASR_SERVE_TOKEN` **只从环境变量读**；不写入 config、不打印、不落到 manifest/JSON/jobs/state/日志；doctor 只报告“token 已设置/未设置”。
+- `--server` URL 中的 userinfo（形如 `http://user:***@host`）视为敏感：错误/doctor/`jobs` 展示时脱敏；重定向不把 `Authorization` 带到不同 origin（跨 origin 直接报错或拒绝跟随）。
 - `doctor --server URL` 新增 check：URL 合法性、TCP/TLS 可达、`GET /v1/models`（带 Bearer）、HTTP 状态、延迟、模型 id、auth 是否被拒；不要求服务端有 GPU。
 - `doctor --json` schema 保持兼容：新增 check 项，不改变顶层字段；`--strict` 语义不变。
 - 远程不可达/401/5xx：doctor 记 `fail`/`warn` 并给 hint；默认仍退出 0，`--strict` 退出 3。
@@ -131,16 +132,19 @@ tests/
 - token：`Authorization: Bearer $QASR_SERVE_TOKEN`；日志与错误 details 不包含 header。
 
 **T2.2 超时、重试、错误映射**
-- `--timeout 300`（秒，请求级）、`--retries 2`（仅 retryable：连接错误、超时、5xx、429）。
-- 语言被服务端拒绝（4xx 且 message 含 language/lang/unsupported）→ 去掉 language 重试一次 + warning，不算 `--retries` 次数。
-- 映射：4xx（400/401/403/404/413/422）→ 退出 4；429/5xx/超时/连接失败 → 退出 3；批量部分失败 → 汇总 6，全部失败取首个错误码。
-- 错误 envelope 的 `error.retryable` 与 `details.http_status` 正确；不得把服务端 body 原样无限打印（截断到合理长度，避免 token 泄漏）。
+- `--timeout 300`（秒，请求级）、`--retries 2`：**总尝试次数 = 1 + retries（默认 3）**；仅 retryable：连接错误、超时、5xx、429、408。
+- 语言被服务端拒绝（4xx 且 message 含 language/lang/unsupported）→ 去掉 language **最多重试一次** + warning，不计入 `--retries`；若再次失败直接报错，不得循环。
+- 映射：400/401/403/404/405/413/422 等普通 4xx → 退出 4（不重试）；408/429/5xx/超时/连接失败 → 退出 3（按 retries 重试）；3xx 不自动跨 origin 重试（见 token 安全）；TLS/DNS/连接重置 → 3。
+- 批量部分失败 → 退出 6；全部失败取**输入顺序首个错误**（不是完成顺序）。`--fail-fast` 时取消未开始任务，已开始任务正常收尾或标记失败，不得留下 `running`。
+- 429 若带 `Retry-After` 且 ≤ 10s，遵守；否则指数退避（0.5s 起，封顶 5s），总延迟受 `--timeout` 约束。
+- 错误 envelope 的 `error.retryable` 与 `details.http_status` 正确；不得把服务端 body 原样无限打印（截断到合理长度，UTF-8 安全，避免 token 泄漏）。
 
 **T2.3 远程并发 `--jobs`**
 - `--server` 下 `--jobs` 默认 4，范围 1–32；线程池，结果按输入顺序输出/写盘。
 - 本地模式 `--jobs != 1` → warning 并强制 1（P0 行为保持）；`--backend remote` 等同 `--server`。
-- `--fail-fast`：取消尚未开始的任务，已完成项正常落盘，退出码取首个错误。
-- 远程批量的 state/resume/lock 与 P0 一致；远程 `--batch-size` 不用于传输并发，避免双重并发（warning 说明）。
+- `--fail-fast`：取消尚未开始的任务，已完成项正常落盘，退出码取输入顺序首个错误；取消项不得遗留 `running`。
+- 远程批量的 state/resume/lock 与 P0 一致；`state.jsonl` 的 append 必须串行化（单写锁/队列），并发完成顺序不得造成行交错或丢记录。
+- 远程 `--batch-size` 不用于传输并发，避免双重并发（显式 >1 时 warning 并忽略）；有效传输并发只由 `--jobs` 控制。
 
 **N2 验收**
 - 测试内假服务覆盖：multipart 字段、chat+context、语言拒绝重试、404 降级、401→4、500→3（重试次数正确）、超时→3、部分失败→6。
@@ -155,6 +159,7 @@ tests/
 - `runtime.py` 懒加载 `qwen_asr.Qwen3ASRModel.LLM(...)`；参数：模型、`device`（CUDA）、`dtype`、`max_inference_batch_size`、`max_new_tokens`、`gpu_memory_utilization`（新增 CLI，仅 vllm）。
 - 支持：批量转写、context、LID、`--timestamps`（aligner 仍用 HF 路径，窗口 ≤180s）。
 - 不支持：MPS、CPU-only、远程语义；显式 `--backend vllm` 在这些平台 → 退出 3，附安装/平台说明。
+- `--gpu-memory-utilization` 仅在 vllm 生效；与 transformers/remote 同用 → 退出 2（不静默忽略）。
 - 批处理沿用 P0 `transcribe.py` 微批与错误隔离；vLLM 批量默认 `--batch-size 8`，失败组逐条重试定位。
 - `--max-new-tokens auto` 仍按本次最大时长计算。
 
@@ -175,26 +180,27 @@ tests/
 **T4.1 `long_audio.py` 纯函数**
 - `plan_windows(total_samples, sr, window_s=180, overlap_s=3, search_s=5) -> list[Window]`
   - `Window`：`index, audio_start_sample, audio_end_sample, core_start_sample, core_end_sample`；采样点是权威值。
-  - 非末尾核心区长度在 `[window_s-overlap_s-2, window_s-overlap_s]` 内；末尾可短；音频窗口 `audio_end-audio_start <= 180s`。
-  - 可选 `energy` 包络参数：在每个目标切点 ±`search_s` 内找能量最低帧；找不到/未提供 → 固定切点。切点不得让任一核心区为空。
-  - 校验 `window_s <= 180`、`0 < overlap_s < window_s`、`search_s >= 0`；非法 → UsageError。
+  - 公式：首个 `core_start=0`；目标核心长 `window_s-overlap_s`；`audio_start=max(0, core_start-overlap_s)`，`audio_end=core_end`；非末尾核心长在 `[window_s-overlap_s-2, window_s-overlap_s]`，末尾可短；`core` 连续无缝、末窗 `core_end=total`；每个 `audio_end-audio_start <= window_s`（默认即 ≤180s）。
+  - 可选 `energy` 包络参数：在目标切点 ±`search_s` 内找能量最低帧；切点必须仍满足核心长区间与音频窗上限；找不到/未提供 → 固定切点。切点不得让任一核心区为空。
+  - 校验 `window_s <= 180`、`0 <= overlap_s < window_s`（允许 0）、`search_s >= 0`；非法 → UsageError（退出 2）。
 - `attribute_reference(ref_text, window_texts) -> list[TextSpan]`
   - 用 NFKC + 去空白 + 去标点的规范化文本做**单调** `SequenceMatcher` 匹配，把全局参考字符区间分配给各窗口；不得跨窗口重复归属。
   - 窗口匹配率低于 0.5 时记录 warning，该窗口仍可交给 aligner；全局覆盖率由既有 `align` 指标计算。
 - `merge_items(items, *, duration_s) -> list[Item]`
-  - 全局偏移后按 start 排序；强制 `start >= prev.end`（重叠时用中点或 prev.end，规则固定并测）；`end >= start`；`end <= duration`；空 item 丢弃。
+  - 全局偏移后按 start 排序；强制 `start = max(start, prev.end)`；若 `end <= start` 则 `end = min(start + 1ms, duration_s)`（duration 不足时丢弃）；`end <= duration`；空 item 丢弃。规则固定并测。
 - `coverage(ref_text, items) -> float` 复用 P0 规范化/匹配语义。
 - 所有函数无 I/O、无模型、无 torch。
 
 **T4.2 `transcribe` 自管切块**
 - `--max-chunk-seconds N`（10–1200）：
-  - 无时间戳默认 270；有时间戳默认 180，且 >180 → 退出 4。
+  - 无时间戳默认 270；有时间戳默认 180，且 >180 → 退出 4；值不在 10–1200 → 退出 2。
   - 用 `long_audio.plan_windows` 规划；按窗口读取音频（soundfile 块读，mono）、转写；时间戳窗口结果按核心区裁剪并加 `audio_start` 偏移。
   - 纯文本窗口结果拼接时处理边界：相邻窗口重叠区只保留核心区对应文本；无法精确切词时保留前窗结果并在 warning 中说明（不得重复整段）。
   - 窗口级 checkpoint：`<out-dir>/.qasr/chunks/<job_key>/<index>.json`（原子写）；`--resume` 复用完整 chunk；`--overwrite` 忽略/清理；最终输出仍走 P0 原子写。
 - **remote 同样走客户端切块**：默认 270s、上限 600s（见 T2.1 的 25MB 限制）；每窗写临时 16k mono WAV 上传，按输入顺序拼接文本；chunk checkpoint 与本地一致。
-- 单窗口 ≤180s 时行为与 P0 完全一致（不得回归）。
+- 单窗口（音频 ≤ `--window-seconds`）时行为与 P0 完全一致（不得回归）。
 - `--timestamps` 的窗口结果 `segments` 必须全局绝对时间；`timestamp_source` 仍为 `forced_aligner`。
+- chunk checkpoint key 必须包含：输入音频内容 SHA、窗口参数（window/overlap/max_chunk）、模型指纹、aligner 指纹、language、context、qasr 版本；任一变化不得复用旧 chunk。
 
 **T4.3 `align` 窗口化**
 - `align` 新增 `--window-seconds 180`（10–180）、`--window-overlap 3.0`（0–10，且 < window）。
@@ -208,13 +214,15 @@ tests/
   6. `merge_items` 单调化并 clamp 到总时长；
   7. 覆盖率按全局参考文本与最终 items 计算，低于 `--coverage-min` → 退出 5。
 - 失败窗口：记录 warning/错误，继续其他窗口；全部失败按 P0 错误码；部分窗口失败导致覆盖率不达标 → 5。
-- 单窗模式仍拒绝 >180s（P0 行为）；窗口化后允许任意时长。
+- **P1 起 `align` 默认窗口化**：音频 > `--window-seconds`（默认 180）自动切窗，不再像 P0 一样直接拒绝；≤180s 时走原单窗路径。181s 必须成功而不是退出 4。`--window-seconds` 上限 180。
+- 窗口参数非法（如 0/负/`window>180`/`overlap>=window`）→ 退出 2。
 - `--dry-run` 输出窗口计划（数量、core/audio 范围），不加载模型。
 
 **T4.4 `align --language auto`**
 - 脚本判定保持 P0：Han→zh、Kana→ja、Hangul→ko、Cyrillic→ru。
 - 拉丁/混合脚本：不直接报错，先对音频前 30s 跑一次 ASR LID；检测结果属于 11 对齐语言 → 使用并 warning（`language_source: "lid_probe"`）；否则退出 4，要求显式语言。
 - 探测失败/空音频 → 退出 4，hint 列 11 语言；不得静默选 en。
+- `align` JSON 增加可选 `language_source: "explicit"|"script"|"lid_probe"`（P0 字段不删；schema 向后兼容）。
 - `align --server` 仍 capability error（N2）。
 
 **N4 验收**
@@ -242,7 +250,8 @@ tests/
 **T5.3 `jobs list` / `jobs show`**
 - 批量启动时在 `QASR_HOME/jobs/<job_id>.json` 登记：`job_id, out_dir, created_at, updated_at, command, total`；job_id 用 out_dir 绝对路径 + 启动时间哈希。
 - `jobs list [--json] [--limit N]`：按 updated_at 倒序；state 不存在 → `missing`。
-- `jobs show JOB_ID|OUT_DIR [--json]`：读 `.qasr/state.jsonl` 汇总 `pending/running/done/failed/skipped`、首错、输出目录；未知 job → 退出 4。
+- `jobs show JOB_ID|OUT_DIR [--json]`：读 `.qasr/state.jsonl` 汇总 `pending/running/done/failed/skipped`、首错、输出目录；未知 job → 退出 4。JOB_ID 必须是索引中存在的 id（不拼任意路径）；OUT_DIR 必须 resolve 后仍是索引登记的目录，拒绝 `..`/symlink 逃逸。
+- `jobs list --limit`：1–10000，非法 → 2。
 - 写入原子；并发安全（同一 out-dir 锁仍由 P0 lock 保证）。
 - 新 schema：`jobs-list.json`、`jobs-show.json`。
 
@@ -254,12 +263,12 @@ tests/
 
 **T5.5 `models show` / `models rm`**
 - `show`：别名解析结果、本地路径、repo id、来源、大小、文件数、verify 状态、指纹、`source.json` 摘要；`--json` schema `models-show.json`。
-- `rm`：只允许删 `QASR_HOME/models/` 下的托管模型；拒绝符号链接、`..`、路径逃逸、非托管目录；必须 `--yes`（非交互）或 TTY 确认；`--dry-run` 打印将删路径；成功输出删除字节数。
+- `rm`：只允许删 `QASR_HOME/models/` 下的托管模型；解析 alias 时**先检查目标目录本身不是 symlink**，再校验 realpath 在 models 根内；拒绝 `..`、绝对路径、根目录本身、非托管目录；必须 `--yes` 或 TTY 确认；**非 TTY 且无 `--yes` → 退出 2，不删除**；`--dry-run` 打印将删路径；成功输出删除字节数。
 - `pull` 后 `show` 的 verify 状态与 P0 一致。
 
 **T5.6 `config get/set`**
 - `config get KEY [--json]`：输出合并后的有效值（含来源可选择）；未知 key → 退出 2。
-- `config set KEY VALUE [--project|--home] [--json]`：默认写 `QASR_HOME/config.json`；`--project` 写最近项目 `.qasr/config.json`（不存在则创建）；原子写、保留未知键、枚举校验（device/dtype/backend/offline）。
+- `config set KEY VALUE [--project|--home] [--json]`：默认写 `QASR_HOME/config.json`；`--project` 从 cwd 向上找最近的 `.git`/`pyproject.toml` 目录作为项目根（找不到则 cwd），写 `<root>/.qasr/config.json`（不存在则创建）；原子写、保留未知键、枚举校验（device/dtype/backend/offline）。目标文件是 symlink → 退出 2，不写。
 - 拒绝设置 `QASR_SERVE_TOKEN`/任何 token 类键（本就不是配置键）；`server` 可设置。
 - `config show` 增加新键 `server`、`timeout`、`retries`、`window_seconds`、`window_overlap`、`max_chunk_seconds` 的来源展示。
 
