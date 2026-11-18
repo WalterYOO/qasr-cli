@@ -238,7 +238,32 @@ stdlib fixture。最终给出 PASS / PASS WITH CHANGES + BLOCKER/MAJOR/MINOR 计
 
 ---
 
-## 7. 交付顺序与门禁
+## 7. 契约裁决（Codex P2-Q1..Q16，2026-11-18）
+
+以下裁决优先于前文含糊处，实现与审查均以此为准。
+
+| ID | 裁决 |
+|---|---|
+| Q1 | cap 触发时只发**一条** `ok:false,is_final:true,error.kind="quality"` 快照，`seq` 取下一序号；即使此前没有任何行也发这条错误快照，不走普通 envelope。不再额外发 `ok:true` 的最终快照（`is_final` 全流只出现一次）。 |
+| Q2 | `stream` 与全局 `--json` **无条件互斥**（任意位置、任意 `--emit`）→ 2，错误本身按 envelope 输出（因为 `--json` 已给出）。机器输出只由 `--emit jsonl` 控制。 |
+| Q3 | completion 的可测契约：对每个顶层子命令，`qasr <cmd> --help` 中出现的**所有 long option** 都必须出现在对应 shell 脚本里；根命令的 long option 也要覆盖；脚本必须包含全部顶层子命令名。测试用 `--help` 动态提取，不维护第二份清单。 |
+| Q4 | 不引入任何运行时 fake 注入开关。stream **成功路径**只在 gpu06 以黑盒方式验收（`-m gpu` 脚本，由协调者/审查方在服务器执行）；Mac 本机黑盒只覆盖 usage、能力错误、PCM 成帧与非成功路径。实现内部单元测试可用 fake backend。 |
+| Q5 | `--strict`：每条 warning 同时追加一条同 `field` 的 error，`warnings` 原样保留；`valid` 只统计“无 error”的行；重复 `audio` 的 warning 同样升级。 |
+| Q6 | 残字节按**帧字节数**（`channels × 2`）判断：不足一帧全部丢弃，stderr warning 带丢弃字节数；不产生半个样本。 |
+| Q7 | 目录/glob/URL → 4；`-` → 2（hint 指向 `--input stdin`）；`--input` 重复出现由 argparse 处理为后者覆盖，不额外报错。 |
+| Q8 | `--pcm/--sample-rate/--channels` 只对 stdin 有意义，与 file/mic 同用 → 2；mic 采集块固定 100ms，`--chunk-ms` 只控制累计解码块（仍须 100–10000ms 且 10ms 整数倍）。 |
+| Q9 | `--realtime`：每个完整 chunk 处理完后睡 `chunk_ms`；首块不预睡；处理超预算不补睡；EOF 尾块不睡。 |
+| Q10 | `audio_s = 已送入 streaming 的累计采样 / 16000`，保留 3 位小数（含最终 partial tail）；partial tail 只在最终快照体现，不单独发非最终快照。 |
+| Q11 | 错误行是独立 `oneOf` 变体，只要求 `schema_version/ok/command/seq/is_final/error`；`seq` 为下一序号；`error` 对象与 `schemas/error.json` 的 `error` 完全一致。 |
+| Q12 | finetune `path` 原样输出；重复 audio 用 resolve 后绝对路径判断；symlink 指向普通文件即可；JSON 语法错误 `field="json"`；summary 固定含 total/valid/errors/warnings 数量。 |
+| Q13 | completion stdout 末尾恰好一个 `\n`；zsh/fish 不存在时跳过语法检查但保留内容/覆盖断言；多余参数 → 2。 |
+| Q14 | 先判 stream 能力（非 vllm、remote、`--server` → 4），再解析模型（缺模型 → 3）；显式 `--backend vllm` 但运行时不可用统一 → 4。 |
+| Q15 | 只要进入 stream 状态机，Ctrl-C 都先发最终快照再 130（已完成的快照为 `ok:true`，读取中出错为 `ok:false`）；未进入状态机则普通 envelope。TTY 用 `\r` 覆盖并在结束补 `\n`，非 TTY 只打印最终文本一次。 |
+| Q16 | `schemas/stream.json` 用 `oneOf` 区分 success/error 变体；`finetune-lint.json` 的 errors/warnings item 要求 `line/field/message` 三者必备，`field` 允许 `"json"` 等哨兵值。 |
+
+---
+
+## 8. 交付顺序与门禁
 
 1. S1/S2/S3（stream + 源 + 快照）→ 本机 fake backend 测试。
 2. C（completion）与 F（finetune lint）→ 独立 commit。
