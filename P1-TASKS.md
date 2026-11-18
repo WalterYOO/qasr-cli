@@ -118,6 +118,7 @@ tests/
 **T2.1 传输契约**
 - 无 context：`POST {server}/v1/audio/transcriptions`，multipart 字段：
   - `file`（文件名、MIME）、`model`（服务端模型 id；默认取 `/v1/models` 首个，可 `--model` 覆盖）、`language`（ISO 码，如 `zh`；`auto` 时不传）。
+  - **2026-11-18 定稿**：只有显式来源（CLI `--model` 或配置）才参与 `/v1/models` 匹配；未显式指定时**不得**传内置默认 1.7B，而是查询 `/v1/models` 取首个 served id（多模型时首个 + warning），否则单模型服务器会被内置默认值误伤为 404。
   - **2026-11-18 gpu06 实测**：vLLM 0.14.0 的 transcription 响应是 `{"text":"language Chinese<asr_text>...","usage":{...}}`，**必须解析前缀**；`language` 字段会校验非法值（`xx`→400 `Unsupported language...`），但合法值对 Qwen3-ASR 实际输出基本无影响（en/zh/yue 都返回 Chinese）。因此语言以服务端输出为准；显式 language 与输出不一致 → warning `server_ignored_language`，不得伪造成用户值。
 - 有 context：`POST {server}/v1/chat/completions`：
   - `messages[0]` 为 `system`，内容为 context 原文（多段 context 以 P0 相同规则合并）；
@@ -135,14 +136,14 @@ tests/
 - `--timeout 300`（秒，请求级）、`--retries 2`：**总尝试次数 = 1 + retries（默认 3）**；仅 retryable：连接错误、超时、5xx、429、408。
 - 语言被服务端拒绝（4xx 且 message 含 language/lang/unsupported）→ 去掉 language **最多重试一次** + warning，不计入 `--retries`；若再次失败直接报错，不得循环。
 - 映射：400/401/403/404/405/413/422 等普通 4xx → 退出 4（不重试）；408/429/5xx/超时/连接失败 → 退出 3（按 retries 重试）；3xx 不自动跨 origin 重试（见 token 安全）；TLS/DNS/连接重置 → 3。
-- 批量部分失败 → 退出 6；全部失败取**输入顺序首个错误**（不是完成顺序）。`--fail-fast` 时取消未开始任务，已开始任务正常收尾或标记失败，不得留下 `running`。
+- 批量部分失败 → 退出 6；全部失败取**输入顺序首个错误**（不是完成顺序）。`--fail-fast` 时取消未开始任务，已开始任务正常收尾或标记失败，不得留下 `running`。**2026-11-18 定稿**：fail-fast 的退出码取触发取消的那个错误（3/4/5），不用 6——未调度项状态是 skipped 而非 failed；6 只用于非 fail-fast 且“有成功有失败”的批量结果。
 - 429 若带 `Retry-After` 且 ≤ 10s，遵守；否则指数退避（0.5s 起，封顶 5s），总延迟受 `--timeout` 约束。
 - 错误 envelope 的 `error.retryable` 与 `details.http_status` 正确；不得把服务端 body 原样无限打印（截断到合理长度，UTF-8 安全，避免 token 泄漏）。
 
 **T2.3 远程并发 `--jobs`**
 - `--server` 下 `--jobs` 默认 4，范围 1–32；线程池，结果按输入顺序输出/写盘。
 - 本地模式 `--jobs != 1` → warning 并强制 1（P0 行为保持）；`--backend remote` 等同 `--server`。
-- `--fail-fast`：取消尚未开始的任务，已完成项正常落盘，退出码取输入顺序首个错误；取消项不得遗留 `running`。
+- `--fail-fast`：取消尚未开始的任务，已完成项正常落盘，退出码取**输入顺序首个错误本身**（3/4/5，不是 6）；取消/未调度项不得遗留 `running`，记 skipped。
 - 远程批量的 state/resume/lock 与 P0 一致；`state.jsonl` 的 append 必须串行化（单写锁/队列），并发完成顺序不得造成行交错或丢记录。
 - 远程 `--batch-size` 不用于传输并发，避免双重并发（显式 >1 时 warning 并忽略）；有效传输并发只由 `--jobs` 控制。
 
@@ -156,7 +157,9 @@ tests/
 ### N3 — vLLM 离线后端与 auto 选择
 
 **T3.1 `VLLMBackend`**
-- `runtime.py` 懒加载 `qwen_asr.Qwen3ASRModel.LLM(...)`；参数：模型、`device`（CUDA）、`dtype`、`max_inference_batch_size`、`max_new_tokens`、`gpu_memory_utilization`（新增 CLI，仅 vllm）。
+- `runtime.py` 懒加载 `qwen_asr.Qwen3ASRModel.LLM(...)`；参数：模型、`dtype`、`max_inference_batch_size`、`max_new_tokens`、`gpu_memory_utilization`（新增 CLI，仅 vllm）。
+  - **2026-11-18 gpu06 实测**：vLLM 0.14 的 `EngineArgs` 不接受 `device`；GPU 选择只能通过 `CUDA_VISIBLE_DEVICES`。显式 `--device cuda:N` 必须在 import torch/vllm 之前写环境变量并改写内部 device 为 `cuda:0`；`auto`/`cuda` 不改环境。
+  - `gpu_memory_utilization` 默认值由 vLLM 决定（0.9），共享 GPU 上需显式降低（如 0.5），否则会因空闲显存不足启动失败。
 - 支持：批量转写、context、LID、`--timestamps`（aligner 仍用 HF 路径，窗口 ≤180s）。
 - 不支持：MPS、CPU-only、远程语义；显式 `--backend vllm` 在这些平台 → 退出 3，附安装/平台说明。
 - `--gpu-memory-utilization` 仅在 vllm 生效；与 transformers/remote 同用 → 退出 2（不静默忽略）。
@@ -172,6 +175,7 @@ tests/
 - Mac 上（无 vllm）：`--backend auto` 仍 transformers；`--backend vllm` 退出 3 且不 import 崩溃。
 - 假 `qwen_asr` 模块单测：构造函数参数、批量、失败隔离、timestamps 路径。
 - gpu06 实机：`--backend vllm transcribe` 短音频/批量成功，结果与 transformers 文本一致（允许标点差异），RTF 仅记录不作门禁。
+- **stdout 纯净（2026-11-18 gpu06 实测新增）**：vLLM 进程退出时 `EngineCore` 日志会写 stdout，污染 `--json`。必须让 vLLM 日志走 stderr（`VLLM_CONFIGURE_LOGGING=0` 或等价 handler 重定向）；验收要求 `--json` 的 stdout 恰好一行且 `json.loads` 成功。
 
 ---
 
