@@ -49,7 +49,7 @@ def probe(path: str | Path) -> AudioInfo:
     except Exception as exc:  # soundfile raises various RuntimeError subclasses
         hint = _CODEC_HINTS.get(target.suffix.casefold())
         raise InputError(
-            f"cannot read audio '{target.name}': {exc}",
+            f"cannot read audio '{target}': {exc}",
             hint=hint,
             details={"path": str(target)},
         ) from exc

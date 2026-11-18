@@ -152,13 +152,18 @@ def _expand_glob(pattern: str, recursive: bool) -> List[Path]:
     return sorted(out, key=lambda p: str(p))
 
 
-def download_url(url: str, *, offline: bool = False) -> Path:
-    """Download (or reuse cached) URL audio under QASR_HOME/cache/url."""
+def url_cache_path(url: str) -> Path:
+    """Deterministic cache path for a URL (no download)."""
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
     suffix = Path(urllib.parse.urlparse(url).path).suffix.casefold()
     if suffix not in AUDIO_EXTENSIONS and suffix not in (".bin", ".raw", ".aac", ".wma"):
         suffix = ".bin"
-    target = cache_dir() / "url" / f"{digest}{suffix}"
+    return cache_dir() / "url" / f"{digest}{suffix}"
+
+
+def download_url(url: str, *, offline: bool = False) -> Path:
+    """Download (or reuse cached) URL audio under QASR_HOME/cache/url."""
+    target = url_cache_path(url)
     if target.is_file() and target.stat().st_size > 0:
         return target
     if offline:
@@ -195,9 +200,13 @@ def download_url(url: str, *, offline: bool = False) -> Path:
     return target
 
 
-def make_url_item(url: str, *, offline: bool = False) -> InputItem:
-    path = download_url(url, offline=offline)
+def make_url_item(url: str, *, offline: bool = False, dry_run: bool = False) -> InputItem:
     item_id = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+    if dry_run:
+        # Plan only: the deterministic cache path, no network access.
+        return InputItem(id=item_id, source=url, path=url_cache_path(url),
+                         rel_path=None, url=url, origin="url")
+    path = download_url(url, offline=offline)
     return InputItem(id=item_id, source=url, path=path, rel_path=None, url=url, origin="url")
 
 
@@ -234,6 +243,7 @@ def expand_inputs(
     recursive: bool = False,
     offline: bool = False,
     cwd: Optional[Path] = None,
+    dry_run: bool = False,
 ) -> ExpandResult:
     """Expand CLI inputs into a stable, de-duplicated list of local items."""
     cwd = cwd or Path.cwd()
@@ -251,7 +261,7 @@ def expand_inputs(
     for spec in specs:
         if is_url(spec):
             try:
-                add(make_url_item(spec, offline=offline))
+                add(make_url_item(spec, offline=offline, dry_run=dry_run))
             except InputError as exc:
                 result.errors.append({"source": spec, "error": exc})
             continue
@@ -316,7 +326,9 @@ def expand_inputs(
     return result
 
 
-def resolve_manifest_audio(record: Dict[str, Any], *, offline: bool = False) -> InputItem:
+def resolve_manifest_audio(
+    record: Dict[str, Any], *, offline: bool = False, dry_run: bool = False
+) -> InputItem:
     """Build an InputItem from a manifest record (audio XOR audio_base64)."""
     audio = record.get("audio")
     b64 = record.get("audio_base64")
@@ -327,7 +339,7 @@ def resolve_manifest_audio(record: Dict[str, Any], *, offline: bool = False) -> 
         return make_base64_item(b64, item_id=item_id)
     assert isinstance(audio, str)
     if is_url(audio):
-        item = make_url_item(audio, offline=offline)
+        item = make_url_item(audio, offline=offline, dry_run=dry_run)
         if item_id:
             item.id = sanitize_id(item_id)
         return item

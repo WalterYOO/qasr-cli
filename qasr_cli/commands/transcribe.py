@@ -15,11 +15,30 @@ from ..errors import (
     UsageError,
 )
 from ..inputs import InputItem, expand_inputs, resolve_manifest_audio
-from ..jobs import load_manifest
+from ..jobs import ensure_output_unlocked, load_manifest
 from ..languages import resolve_alignable, resolve_forceable
 from .common import CommandContext, parse_auto_int, resolve_device_dtype
 
 GRANULARITIES = ("sentence", "word", "char")
+
+
+def _preflight(specs: List[core.ItemSpec], *, dry_run: bool) -> None:
+    """Probe inputs up front so bad files fail before model/runtime checks.
+
+    Failures stay on the spec (not in ``spec_errors``) so state/manifest runs
+    can record a ``failed`` entry for them.
+    """
+    from ..audio import probe
+
+    for spec in specs:
+        try:
+            if spec.item.path is None:
+                raise InputError(f"no local file for input {spec.id}")
+            if dry_run and spec.item.origin == "url" and not spec.item.path.exists():
+                continue
+            spec.info = probe(spec.item.path)
+        except QasrError as exc:
+            spec.error = exc
 
 
 def _read_context_file(path: str) -> List[str]:
@@ -81,14 +100,15 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     spec_errors: List[Dict[str, Any]] = []
 
     if getattr(ns, "manifest", None):
-        if (getattr(ns, "out_dir", None) is None
-                and not (ctx.json_mode or ctx.jsonl_mode or getattr(ns, "output", None) == "-")):
+        if getattr(ns, "out_dir", None) is None:
             raise UsageError("--manifest requires --out-dir",
                              hint="state and outputs are written under the output directory")
         records = load_manifest(ns.manifest)
         for record in records:
             try:
-                item = resolve_manifest_audio(record, offline=bool(cfg.get("offline")))
+                item = resolve_manifest_audio(
+                    record, offline=bool(cfg.get("offline")), dry_run=ctx.dry_run
+                )
             except QasrError as exc:
                 spec_errors.append({"id": record.get("id"), "source": record.get("audio")
                                     or "audio_base64", "error": exc})
@@ -104,6 +124,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
             inputs,
             recursive=bool(getattr(ns, "recursive", False)),
             offline=bool(cfg.get("offline")),
+            dry_run=ctx.dry_run,
         )
         spec_errors.extend(expansion.errors)
         formats = _normalize_formats(getattr(ns, "format", None),
@@ -121,6 +142,9 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                 )
             )
 
+    # ---- preflight: validate every input before touching the runtime ----
+    _preflight(specs, dry_run=ctx.dry_run)
+
     if not specs and not spec_errors:
         raise UsageError("no input given")
 
@@ -129,6 +153,16 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     output = getattr(ns, "output", None)
     if out_dir is not None and output:
         raise UsageError("--out-dir and --output are mutually exclusive")
+
+    total_inputs = len(specs) + len(spec_errors)
+    if output and total_inputs > 1:
+        raise UsageError("--output accepts a single input only",
+                         hint="use --out-dir for multiple inputs")
+    if getattr(ns, "resume", False) and out_dir is None:
+        raise UsageError("--resume requires --out-dir",
+                         hint="resume state lives in <out-dir>/.qasr/state.jsonl")
+    if out_dir is not None and not ctx.dry_run:
+        ensure_output_unlocked(out_dir)
 
     if getattr(ns, "format", None):
         formats = _normalize_formats(ns.format, ["txt"])
@@ -196,12 +230,36 @@ def handle(ns: Any, ctx: CommandContext) -> int:
             raise UsageError("--format json/jsonl cannot be combined with --json/--jsonl",
                              hint="pick one output channel")
 
+    # ---- numeric options (validate before any runtime work) -------------
+    batch_size = getattr(ns, "batch_size", None)
+    if batch_size is None:
+        batch_size = cfg.get("batch_size")
+    if batch_size is None:
+        batch_size = 1
+    if int(batch_size) < 1:
+        raise UsageError("--batch-size must be >= 1")
+    max_inference = getattr(ns, "max_inference_batch_size", None)
+    if max_inference is None:
+        max_inference = cfg.get("max_inference_batch_size")
+    if max_inference is None:
+        max_inference = batch_size
+    if int(max_inference) < 1:
+        raise UsageError("--max-inference-batch-size must be >= 1")
+    if getattr(ns, "jobs", None) and int(ns.jobs) > 1:
+        ctx.warn("local mode forces --jobs 1 (use --batch-size for throughput)")
+
+    max_new_tokens = parse_auto_int(getattr(ns, "max_new_tokens", None))
+
     # ---- model / aligner ------------------------------------------------
-    # When every input already failed to expand, report those input errors
-    # before touching the runtime (a missing model must not mask them).
-    has_specs = bool(specs)
+    # When every input already failed preflight, report those errors before
+    # touching the runtime (a missing model must not mask them). Zero-sample
+    # audio produces an empty result without inference, so it needs no model.
+    needs_runtime = any(
+        spec.error is None and (spec.info is None or not spec.info.is_empty)
+        for spec in specs
+    )
     model = resolve_model(cfg.get("model"), cfg)
-    if not ctx.dry_run and has_specs:
+    if not ctx.dry_run and needs_runtime:
         require_local(model, action="transcribe")
     model_path = model.path or Path(str(model.value))
 
@@ -218,24 +276,11 @@ def handle(ns: Any, ctx: CommandContext) -> int:
             hint="P0 supports the local transformers backend; vLLM/remote arrive in P1",
         )
 
-    device, dtype = resolve_device_dtype(cfg, optional=ctx.dry_run or not has_specs)
-
-    batch_size = getattr(ns, "batch_size", None) or cfg.get("batch_size") or 1
-    if int(batch_size) < 1:
-        raise UsageError("--batch-size must be >= 1")
-    max_inference = (
-        getattr(ns, "max_inference_batch_size", None)
-        or cfg.get("max_inference_batch_size")
-        or batch_size
-    )
-    if getattr(ns, "jobs", None) and int(ns.jobs) > 1:
-        ctx.warn("local mode forces --jobs 1 (use --batch-size for throughput)")
-
-    max_new_tokens = parse_auto_int(getattr(ns, "max_new_tokens", None))
+    device, dtype = resolve_device_dtype(cfg, optional=ctx.dry_run or not needs_runtime)
 
     model_fingerprint = None
     aligner_fingerprint = None
-    if not ctx.dry_run and has_specs:
+    if not ctx.dry_run and needs_runtime:
         cache = FingerprintCache()
         if model.present and model.path is not None:
             model_fingerprint = cache.dir_fingerprint(model.path)

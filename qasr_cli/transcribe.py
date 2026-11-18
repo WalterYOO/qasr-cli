@@ -13,6 +13,7 @@ from .audio import AudioInfo, max_new_tokens_for, probe
 from .backends import (
     TranscribeJob,
     TranscribeOptions,
+    TranscribeResult,
     build_transformers_backend,
 )
 from .config import Config
@@ -82,6 +83,7 @@ class ItemSpec:
     audio_sha256: str = ""
     job_key: str = ""
     error: Optional[QasrError] = None
+    empty: bool = False
     skipped: bool = False
     started_at: Optional[str] = None
     result: Any = None
@@ -208,6 +210,13 @@ def run(
         if spec.item.path is None:
             spec.error = InputError(f"no local file for input {spec.id}")
             continue
+        if (
+            settings.dry_run
+            and spec.item.origin == "url"
+            and not spec.item.path.exists()
+        ):
+            # Dry-run plans URL inputs without downloading them.
+            continue
         try:
             spec.info = probe(spec.item.path)
             spec.audio_sha256 = sha256_file(spec.item.path)
@@ -215,6 +224,19 @@ def run(
             spec.error = exc
         except OSError as exc:
             spec.error = InputError(f"cannot read {spec.item.path}: {exc}")
+
+    for spec in specs:
+        if spec.error is None and spec.info is not None and spec.info.is_empty:
+            # Zero-sample audio: success with empty text, no model needed.
+            spec.empty = True
+            spec.result = TranscribeResult(
+                text="",
+                language=None,
+                language_source="forced" if spec.language else "auto",
+                segments=[],
+                timestamp_source=None,
+                warnings=["empty audio"],
+            )
 
     valid = [spec for spec in specs if spec.error is None]
 
@@ -379,7 +401,19 @@ def _run_locked(
                     )
                 log(f"skip {spec.id} (resume: unchanged)")
                 continue
+        if spec.empty:
+            continue
         pending.append(spec)
+
+    # Empty inputs are complete without inference (and never load the model).
+    for spec in valid:
+        if spec.empty and not spec.skipped:
+            _complete_item(
+                spec, spec.result, settings, log,
+                load_ms=0, infer_ms=0,
+                state_path=state_path,
+                display_out_dir=display_out_dir,
+            )
 
     if pending:
         try:
@@ -705,7 +739,7 @@ def _write_outputs(
 
     allow_overwrite = settings.overwrite or settings.resume
     for fmt, target in targets:
-        if fmt in SUBTITLE_FORMATS and not spec.result.segments:
+        if fmt in SUBTITLE_FORMATS and not spec.result.segments and not spec.empty:
             raise CapabilityError(
                 f"cannot write {fmt} without timestamps",
                 hint="pass --timestamps --language <alignable language>, or run 'qasr align'",
