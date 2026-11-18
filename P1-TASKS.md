@@ -99,7 +99,7 @@ tests/
 - `pyproject.toml` 增加 `vllm = ["qwen-asr[vllm]==0.0.6"]`；`qasr --help` 与 base 安装仍不 import vllm。
 
 **T1.2 远程配置与 `doctor --server`**
-- 全局 `--server URL`，优先级：CLI > `QASR_SERVE_URL` > 配置 `server`；隐含 `backend=remote` 且与显式 `--backend transformers|vllm` 冲突时退出 2。
+- 全局 `--server URL`，优先级遵循 DESIGN §3.9 的统一配置层：CLI > `--config` 文件 > `QASR_SERVE_URL` 环境变量 > 项目配置 > `QASR_HOME` 配置；隐含 `backend=remote` 且与显式 `--backend transformers|vllm` 冲突时退出 2。
 - `QASR_SERVE_TOKEN` **只从环境变量读**；不写入 config、不打印、不落到 manifest/JSON/jobs/state/日志；doctor 只报告“token 已设置/未设置”。
 - `--server` URL 中的 userinfo（形如 `http://user:***@host`）视为敏感：错误/doctor/`jobs` 展示时脱敏；重定向不把 `Authorization` 带到不同 origin（跨 origin 直接报错或拒绝跟随）。
 - `doctor --server URL` 新增 check：URL 合法性、TCP/TLS 可达、`GET /v1/models`（带 Bearer）、HTTP 状态、延迟、模型 id、auth 是否被拒；不要求服务端有 GPU。
