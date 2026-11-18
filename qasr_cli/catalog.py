@@ -714,6 +714,12 @@ def remove_model(
     import os
     import sys
 
+    if ".." in Path(value).expanduser().parts:
+        raise UsageError(
+            f"refusing to remove a path containing '..': {value}",
+            hint="pass an alias or a plain path under the models directory",
+        )
+
     root_path = models_root(config)
     spec = spec_for(value)
     if spec is not None:

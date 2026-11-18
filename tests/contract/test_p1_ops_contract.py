@@ -360,6 +360,18 @@ def test_models_rm_rejects_symlinked_path(capsys, model_factory, tmp_path):
     assert real.is_dir()
 
 
+def test_models_rm_rejects_parent_segments_even_inside_root(
+    capsys, model_factory, monkeypatch
+):
+    model_factory("Qwen3-ASR-1.7B")
+    monkeypatch.chdir(qasr_home() / "models")
+    code = main([
+        "models", "rm", "../models/Qwen3-ASR-1.7B", "--yes", "--dry-run", "--json",
+    ])
+    capsys.readouterr()
+    assert code == 2
+
+
 def test_models_rm_rejects_root_and_nested(capsys, model_factory):
     model_factory("Qwen3-ASR-1.7B")
     root = qasr_home() / "models"
