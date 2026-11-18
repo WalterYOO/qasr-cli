@@ -87,16 +87,18 @@ def test_json_and_jsonl_are_mutually_exclusive(qasr):
         assert_error(parse_json(proc), code=2, kind="usage")
 
 
-@pytest.mark.parametrize("command", ["serve", "stream"])
+@pytest.mark.parametrize("command", ["stream"])
 def test_p1_commands_are_not_available(qasr, command):
     proc = qasr.run(command)
     assert_exit(proc, 2, context=f"P1 command {command}")
 
 
-@pytest.mark.parametrize("flag", ["--skip-existing", "--retry", "--stdin-list", "--window-seconds"])
-def test_p1_transcribe_flags_are_not_available(qasr, flag):
-    proc = qasr.run("transcribe", flag, "x.wav")
-    assert_exit(proc, 2, context=f"P1 flag {flag}")
+@pytest.mark.parametrize("flag", ["--skip-existing", "--retry", "--stdin-list"])
+def test_p1_transcribe_flags_are_accepted(qasr, flag):
+    """P1 flags must parse (the P1 suite asserts their full semantics)."""
+    proc = qasr.run("transcribe", flag, "x.wav", stdin="")
+    assert_exit(proc, (2, 3, 4), context=f"P1 flag {flag}")
+    assert "unrecognized arguments" not in proc.stderr.lower(), proc.stderr
 
 
 @pytest.mark.parametrize(

@@ -172,7 +172,8 @@ def test_align_auto_rejects_latin_script(qasr, make_wav):
         "--language",
         "auto",
     )
-    assert_exit(proc, 4, context="align auto with Latin text")
-    error = assert_error(parse_json(proc), code=4)
-    text = (error.get("message", "") + " " + str(error.get("hint", ""))).lower()
-    assert "language" in text, f"Latin auto error lacks language guidance: {error!r}"
+    # P1 routes Latin `auto` through a 30s ASR LID probe instead of rejecting
+    # at the script gate.  Reaching model resolution proves the gate change;
+    # the probe result paths need either real weights or an in-process fake
+    # backend, so they are covered by the implementation's contract tests.
+    assert_exit(proc, 3, context="align auto with Latin text")

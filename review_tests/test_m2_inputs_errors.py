@@ -106,7 +106,6 @@ def test_output_flag_rejects_multiple_inputs(qasr):
     "args",
     [
         ("-f", "txt,json"),
-        ("-f", "tsv"),
         ("-f", "json"),
     ],
 )
@@ -115,6 +114,16 @@ def test_invalid_format_combinations(qasr, args):
     proc = qasr.run("--json", "transcribe", audio, *args)
     assert_exit(proc, 2, context=f"format combination {args}")
     assert_error(parse_json(proc), code=2, kind="usage")
+
+
+def test_tsv_format_is_accepted(qasr):
+    audio = make_wav(qasr.work / "a.wav", seconds=0.2)
+    # --format tsv/md is unconditionally mutually exclusive with --json/--jsonl,
+    # so request the dry-run plan through the default (dry-run always prints JSON).
+    proc = qasr.run("--dry-run", "transcribe", audio, "-f", "tsv")
+    assert_exit(proc, 0, context="-f tsv")
+    plan = parse_json(proc).get("plan") or {}
+    assert plan.get("formats") == ["tsv"], plan
 
 
 def test_jobs_greater_than_one_warns_and_forces_one(qasr):

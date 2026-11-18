@@ -115,22 +115,18 @@ def test_align_missing_text_file(qasr):
     assert_error(parse_json(proc), code=4)
 
 
-def test_align_rejects_audio_over_180s(qasr):
+def test_align_windows_audio_over_180s(qasr):
     audio = make_wav(qasr.work / "long.wav", seconds=181, silent=True)
-    proc = _align(
-        qasr,
-        audio,
-        "--text",
-        "hello",
-        "--language",
-        "en",
-        model="/nonexistent/model",
-        timeout=180,
+    proc = qasr.run(
+        "--json", "--dry-run", "align", audio,
+        "--text", "hello", "--language", "en",
     )
-    assert_exit(proc, 4, context="align 181s")
-    error = assert_error(parse_json(proc), code=4)
-    text = (error.get("message", "") + " " + str(error.get("hint", ""))).lower()
-    assert "180" in text or "window" in text, f"over-limit error lacks guidance: {error!r}"
+    assert_exit(proc, 0, context="align 181s dry-run")
+    plan = parse_json(proc).get("plan") or {}
+    windows = plan.get("windows") or []
+    # P1 windows anything over 180s instead of rejecting it.
+    assert len(windows) >= 2, plan
+    assert abs(float(windows[-1]["core_end_s"]) - 181.0) < 0.5, windows[-1]
 
 
 def test_align_accepts_audio_under_180s(qasr):
@@ -156,7 +152,7 @@ def test_invalid_coverage_min(qasr, value):
     assert_exit(proc, 2, context=f"--coverage-min {value}")
 
 
-def test_align_has_no_server_flag_in_p0(qasr):
+def test_align_server_is_a_capability_error(qasr):
     audio = make_wav(qasr.work / "a.wav", seconds=0.5)
     proc = _align(
         qasr,
@@ -168,7 +164,9 @@ def test_align_has_no_server_flag_in_p0(qasr):
         "--server",
         "http://127.0.0.1:9",
     )
-    assert_exit(proc, 2, context="align --server")
+    assert_exit(proc, 4, context="align --server")
+    payload = parse_json(proc)
+    assert payload["error"]["kind"] == "capability", payload
 
 
 def test_align_multiple_formats_require_out_dir(qasr):

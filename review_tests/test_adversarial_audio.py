@@ -87,7 +87,7 @@ def test_empty_wav_with_timestamps_needs_no_aligner(qasr):
     assert result.get("language") is None
 
 
-@pytest.mark.parametrize("seconds,expected", [(180.0, 3), (180.5, 4)])
+@pytest.mark.parametrize("seconds,expected", [(180.0, 3), (180.5, 3)])
 def test_align_180_second_boundary(qasr, seconds, expected):
     audio = make_wav(qasr.work / f"len-{seconds}.wav", seconds=seconds, silent=True)
     proc = qasr.run(
@@ -103,10 +103,9 @@ def test_align_180_second_boundary(qasr, seconds, expected):
         timeout=180,
     )
     assert_exit(proc, expected, context=f"align {seconds}s")
-    if expected == 4:
-        error = assert_error(parse_json(proc), code=4)
-        text = (error.get("message", "") + " " + str(error.get("hint", ""))).lower()
-        assert "180" in text or "window" in text
+    # P1 removed the 180s hard cap; both lengths now reach model resolution
+    # (exit 3 with the deliberately missing model). Exact-180s single-window
+    # behaviour is asserted in review_tests_p1/test_n4_long_audio.py.
 
 
 def test_dry_run_never_imports_runtime(qasr, import_blocker):

@@ -164,11 +164,15 @@ def test_formats_must_be_a_list(qasr):
     assert_exit(proc, 2, context="manifest formats as string")
 
 
-def test_p1_format_in_manifest_is_rejected(qasr):
+def test_p1_format_in_manifest_is_accepted(qasr):
     a = make_wav(qasr.work / "a.wav", seconds=0.2)
     manifest = _manifest(qasr, [{"id": "a", "audio": str(a), "formats": ["tsv"]}])
     proc = _dry_run_manifest(qasr, manifest)
-    assert_exit(proc, 2, context="manifest formats tsv")
+    assert_exit(proc, 0, context="manifest formats tsv")
+    plan = parse_json(proc).get("plan") or {}
+    assert plan.get("formats") == ["tsv"], plan
+    outputs = plan.get("outputs") or []
+    assert outputs and outputs[0].get("format") == "tsv", outputs
 
 
 def test_manifest_timestamps_auto_is_capability_error(qasr):

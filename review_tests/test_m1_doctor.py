@@ -57,9 +57,12 @@ def test_doctor_strict_with_missing_runtime_exits_3(qasr, import_blocker):
     assert payload.get("status") in {"warn", "fail"}
 
 
-def test_doctor_server_flag_is_p1(qasr):
+def test_doctor_server_flag_is_available(qasr):
     proc = qasr.run("--json", "doctor", "--server", "http://127.0.0.1:9")
-    assert_exit(proc, 2, context="doctor --server is P1")
+    assert_exit(proc, 0, context="doctor --server")
+    payload = json.loads(proc.stdout)
+    server_checks = [c for c in payload["checks"] if c["name"] == "server"]
+    assert len(server_checks) == 1, payload
 
 
 def test_doctor_stdout_is_pure_json(qasr):
