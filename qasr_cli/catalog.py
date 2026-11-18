@@ -631,7 +631,11 @@ def require_local(resolved: ResolvedModel, *, action: str = "transcribe") -> Pat
         alias = resolved.alias or resolved.value
         raise ModelError(
             f"model '{resolved.value}' is not available locally"
-            + (" (online download is P1)" if resolved.repo else ""),
+            + (
+                " (automatic download is not supported; run 'qasr models pull')"
+                if resolved.repo
+                else ""
+            ),
             hint=PULL_HINT.format(alias=alias) if resolved.alias else None,
             details={"action": action},
         )
