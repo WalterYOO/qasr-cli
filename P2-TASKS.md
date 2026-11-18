@@ -76,8 +76,8 @@ qasr [--backend vllm] stream --input a.wav --language zh --context "..." --emit 
 - 全局 `--device` / `--dtype` / `--gpu-memory-utilization` 与 `transcribe`/`bench`
   同语义：显式设备映射到 `CUDA_VISIBLE_DEVICES`，`--gpu-memory-utilization`
   必须透传给 `VLLMBackend`（共享 GPU 上不传会按 0.9 OOM）。
-- `--json` 只影响错误 envelope 与人类模式；与 `--emit jsonl` 同用是允许的
-  （不额外输出 envelope），与 `--emit text` 同用 → 2。
+- `--json` 与 `stream` **无条件互斥**（任意位置、任意 `--emit`）→ 2；
+  机器输出只由 `--emit jsonl` 控制（见 §7 Q2）。
 - `--realtime` 只允许 file；与 stdin/mic 同用 → 2。
 - `--emit jsonl` 与人类模式都由同一状态机产出，不允许两条代码路径。
 
@@ -117,8 +117,7 @@ qasr [--backend vllm] stream --input a.wav --language zh --context "..." --emit 
   "error":{kind,code,message,retryable,details}}` 后按该错误码退出；
   尚未输出过任何行时走普通错误 envelope。
 - 人类 `text` 模式：TTY 用 `\r` 覆盖当前行、结束换行；非 TTY 只在最终快照
-  打印一次文本。`--emit text` 时不允许同时 `--json`（`--json` 只影响 envelope，
-  与 jsonl 流冲突 → 2）。
+  打印一次文本。`--json` 与 `stream` 无条件互斥 → 2（见 §7 Q2）。
 - 超过 `--max-stream-seconds`：停止读源，以 5 退出，error.kind=`quality`，
   message 明确是运行上限而非识别质量。输出形态按 §7 Q1：只发一条
   `ok:false,is_final:true` 的错误快照（不额外发 `ok:true` 最终快照）。
