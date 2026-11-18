@@ -132,7 +132,7 @@ def test_tsv_output_file_via_out_dir(
     out = tmp_path / "out"
     code = main([
         "transcribe", str(wav), "--device", "cpu", "--dtype", "fp32",
-        "-o", str(out), "--format", "tsv", "--json",
+        "-o", str(out), "--format", "tsv",
     ])
     assert code == 0
     assert (out / "a.tsv").read_text(encoding="utf-8").startswith(
@@ -148,12 +148,72 @@ def test_tsv_language_comes_from_result_payload(
     out = tmp_path / "out"
     code = main([
         "transcribe", str(wav), "--device", "cpu", "--dtype", "fp32",
-        "--language", "zh", "-o", str(out), "--format", "tsv", "--json",
+        "--language", "zh", "-o", str(out), "--format", "tsv",
     ])
     assert code == 0, capsys.readouterr()
     rows = (out / "a.tsv").read_text(encoding="utf-8").splitlines()
     assert rows[0] == "id\tstart\tend\ttext\tlanguage"
     assert rows[1].split("\t")[4] == "Chinese"
+
+
+@pytest.mark.parametrize("fmt", ["tsv", "md"])
+@pytest.mark.parametrize("json_flag", ["--json", "--jsonl"])
+def test_tsv_md_reject_json_flags_unconditionally(
+    capsys, tmp_path, model_dir, fmt, json_flag
+):
+    wav = write_wav(tmp_path / "a.wav")
+    code = main([
+        "transcribe", str(wav), "--device", "cpu", "--dtype", "fp32",
+        "--format", fmt, json_flag,
+    ])
+    captured = capsys.readouterr()
+    assert code == 2, captured
+    if json_flag == "--json":
+        payload = json.loads(captured.out)
+        message = payload["error"]["message"]
+    else:
+        message = captured.err + captured.out
+    assert fmt in message
+
+
+def test_dash_is_rejected_as_positional_input(capsys, tmp_path, model_dir):
+    code = main([
+        "transcribe", "-", "--device", "cpu", "--dtype", "fp32", "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert "--stdin-list" in payload["error"]["hint"]
+
+
+def test_dash_is_rejected_in_stdin_list(
+    capsys, tmp_path, model_dir, monkeypatch
+):
+    monkeypatch.setattr("sys.stdin", io.StringIO("-\n"))
+    code = main([
+        "transcribe", "--stdin-list", "--device", "cpu", "--dtype", "fp32",
+        "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert "--stdin-list" in payload["error"]["hint"]
+
+
+def test_skip_existing_does_not_resolve_or_load_model(
+    capsys, tmp_path, fake_backend
+):
+    wav = write_wav(tmp_path / "a.wav")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "a.txt").write_text("already done", encoding="utf-8")
+    code = main([
+        "transcribe", str(wav), "--device", "cpu", "--dtype", "fp32",
+        "--model", "missing/model", "--skip-existing",
+        "-o", str(out), "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload
+    assert payload["skipped"] is True
+    assert fake_backend.calls == 0
 
 
 def test_markdown_language_not_required_but_tsv_dict_result():

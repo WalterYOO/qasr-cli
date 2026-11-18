@@ -1447,6 +1447,11 @@ def _outputs_complete(spec: ItemSpec, settings: TranscribeSettings) -> bool:
     return all(path.is_file() and path.stat().st_size > 0 for path in paths)
 
 
+def outputs_complete(spec: ItemSpec, settings: TranscribeSettings) -> bool:
+    """Public check used by the command layer to skip model resolution."""
+    return _outputs_complete(spec, settings)
+
+
 def _write_outputs(
     spec: ItemSpec,
     settings: TranscribeSettings,

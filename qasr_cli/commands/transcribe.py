@@ -167,6 +167,11 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                 "no input given",
                 hint="qasr transcribe INPUT... | --stdin-list | --manifest FILE",
             )
+        if any(str(value).strip() == "-" for value in inputs):
+            raise UsageError(
+                "'-' is not an input path",
+                hint="pipe newline-separated paths with --stdin-list, or pass /dev/stdin explicitly",
+            )
         expansion = expand_inputs(
             inputs,
             recursive=bool(getattr(ns, "recursive", False)),
@@ -300,11 +305,16 @@ def handle(ns: Any, ctx: CommandContext) -> int:
             hint="write files with -o DIR, or stream JSON with --jsonl",
         )
 
-    if (ctx.json_mode or ctx.jsonl_mode) and getattr(ns, "format", None):
-        chosen = _normalize_formats(ns.format, ["txt"])
-        if any(fmt in ("json", "jsonl") for fmt in chosen):
-            raise UsageError("--format json/jsonl cannot be combined with --json/--jsonl",
-                             hint="pick one output channel")
+    if ctx.json_mode or ctx.jsonl_mode:
+        requested_format = getattr(ns, "format", None) or cfg.get("format")
+        if requested_format:
+            chosen = _normalize_formats(requested_format, ["txt"])
+            if any(fmt in ("json", "jsonl") for fmt in chosen):
+                raise UsageError("--format json/jsonl cannot be combined with --json/--jsonl",
+                                 hint="pick one output channel")
+            if any(fmt in ("tsv", "md") for fmt in chosen):
+                raise UsageError("--format tsv/md cannot be combined with --json/--jsonl",
+                                 hint="write tsv/md files with -o DIR or --output")
 
     # ---- numeric options (validate before any runtime work) -------------
     batch_size = getattr(ns, "batch_size", None)
@@ -386,37 +396,92 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     max_new_tokens = parse_auto_int(getattr(ns, "max_new_tokens", None))
 
     # ---- model / aligner ------------------------------------------------
-    # When every input already failed preflight, report those errors before
-    # touching the runtime (a missing model must not mask them). Zero-sample
-    # audio produces an empty result without inference, so it needs no model.
-    needs_runtime = any(
-        spec.error is None and (spec.info is None or not spec.info.is_empty)
-        for spec in specs
+    # A run whose every output already exists under --skip-existing must not
+    # resolve or load a model at all: completed outputs are still valid
+    # results even when the model has since been removed from this host.
+    early_skip = (
+        bool(getattr(ns, "skip_existing", False))
+        and not ctx.dry_run
+        and bool(specs)
+        and not spec_errors
+        and all(spec.error is None for spec in specs)
     )
-    model = resolve_model(cfg.get("model"), cfg)
-    if not ctx.dry_run and needs_runtime and not is_remote:
-        require_local(model, action="transcribe")
-    if is_remote:
-        # Without an explicit --model the server's /v1/models list is
-        # authoritative; asking for the local default alias would 404 on
-        # servers that only expose a served-model-name.
-        if cfg.source_of("model") == "default":
-            model_id = ""
-            model_path = Path(".")
-        else:
-            model_id = model.repo or str(model.value)
-            model_path = model.path or Path(model_id)
-    else:
-        model_path = model.path or Path(str(model.value))
-        model_id = model.repo or model.alias or str(model_path)
+    if early_skip:
+        check_settings = core.TranscribeSettings(
+            model_path=Path("."),
+            model_id="",
+            formats=specs[0].formats if specs else ["txt"],
+            out_dir=out_dir,
+            output=output,
+        )
+        early_skip = all(
+            core.outputs_complete(spec, check_settings) for spec in specs
+        )
 
-    # Zero-sample inputs have nothing to align: no aligner is needed for them.
-    need_align = any(
-        spec.timestamps and not (spec.info is not None and spec.info.is_empty)
-        for spec in specs
-    )
-    aligner = resolve_aligner(cfg.get("aligner"), cfg, required=need_align and not ctx.dry_run) if need_align else None
-    aligner_path = aligner.path if aligner is not None else None
+    if early_skip:
+        model = None
+        model_path = Path(".")
+        model_id = ""
+        aligner = None
+        aligner_path = None
+        model_fingerprint = None
+        aligner_fingerprint = None
+        # No inference happens; avoid probing CUDA or importing torch.
+        device, dtype = "cpu", "fp32"
+    else:
+        # When every input already failed preflight, report those errors before
+        # touching the runtime (a missing model must not mask them). Zero-sample
+        # audio produces an empty result without inference, so it needs no model.
+        needs_runtime = any(
+            spec.error is None and (spec.info is None or not spec.info.is_empty)
+            for spec in specs
+        )
+        model = resolve_model(cfg.get("model"), cfg)
+        if not ctx.dry_run and needs_runtime and not is_remote:
+            require_local(model, action="transcribe")
+        if is_remote:
+            # Without an explicit --model the server's /v1/models list is
+            # authoritative; asking for the local default alias would 404 on
+            # servers that only expose a served-model-name.
+            if cfg.source_of("model") == "default":
+                model_id = ""
+                model_path = Path(".")
+            else:
+                model_id = model.repo or str(model.value)
+                model_path = model.path or Path(model_id)
+        else:
+            model_path = model.path or Path(str(model.value))
+            model_id = model.repo or model.alias or str(model_path)
+
+        # Zero-sample inputs have nothing to align: no aligner is needed for them.
+        need_align = any(
+            spec.timestamps and not (spec.info is not None and spec.info.is_empty)
+            for spec in specs
+        )
+        aligner = (
+            resolve_aligner(cfg.get("aligner"), cfg, required=need_align and not ctx.dry_run)
+            if need_align
+            else None
+        )
+        aligner_path = aligner.path if aligner is not None else None
+
+        if is_remote:
+            # The remote backend never imports torch: device/dtype are irrelevant.
+            device, dtype = "remote", "fp32"
+        else:
+            device, dtype = resolve_device_dtype(
+                cfg, optional=ctx.dry_run or not needs_runtime
+            )
+
+        model_fingerprint = None
+        aligner_fingerprint = None
+        if not ctx.dry_run and needs_runtime and not is_remote:
+            cache = FingerprintCache()
+            if model.present and model.path is not None:
+                model_fingerprint = cache.dir_fingerprint(model.path)
+            if aligner is not None and aligner.present and aligner.path is not None:
+                aligner_fingerprint = cache.dir_fingerprint(aligner.path)
+            cache.flush()
 
     backend_name = backend_choice
     if backend_name not in ("transformers", "vllm", "remote"):
@@ -426,24 +491,6 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         )
     if backend_fallback:
         ctx.warn("vLLM is not importable on this CUDA host; falling back to transformers")
-
-    if is_remote:
-        # The remote backend never imports torch: device/dtype are irrelevant.
-        device, dtype = "remote", "fp32"
-    else:
-        device, dtype = resolve_device_dtype(
-            cfg, optional=ctx.dry_run or not needs_runtime
-        )
-
-    model_fingerprint = None
-    aligner_fingerprint = None
-    if not ctx.dry_run and needs_runtime and not is_remote:
-        cache = FingerprintCache()
-        if model.present and model.path is not None:
-            model_fingerprint = cache.dir_fingerprint(model.path)
-        if aligner is not None and aligner.present and aligner.path is not None:
-            aligner_fingerprint = cache.dir_fingerprint(aligner.path)
-        cache.flush()
 
     settings = core.TranscribeSettings(
         model_path=model_path,
