@@ -3,18 +3,26 @@
 Script-friendly local ASR runtime for Qwen3-ASR: transcription, language ID,
 context biasing, timestamps, forced alignment, batch jobs with resumable state.
 
-> P1 adds `serve`, an OpenAI-compatible remote client, vLLM, long-audio
-> windowing, concurrent remote jobs and batch operations. Streaming,
-> microphone input, completion and finetuning remain P2.
+> P2 adds `stream` (file, stdin PCM and microphone through a local vLLM
+> backend), shell completion generation for bash/zsh/fish, and
+> `finetune lint-jsonl` for SFT data validation. It does not train models.
 
 ## Install
 
 ```bash
 uv tool install --python 3.12 "qasr-cli[local]"
+uv tool install --python 3.12 "qasr-cli[vllm,mic]"   # Linux + CUDA streaming
 ```
 
 Python `>=3.10,<3.13` is required. Without `[local]` the CLI still provides
-model management, `languages`, `config` and `doctor` (remote-only install).
+model management, `languages`, `config`, `completion`, `finetune` and `doctor`
+(remote-only install). `[mic]` adds `sounddevice` for `stream --input mic`;
+`[vllm]` needs Linux + CUDA. `[all]` installs local, mic, hf and modelscope.
+
+## Commands
+
+`transcribe`, `align`, `bench`, `serve`, `stream`, `completion`,
+`finetune`, `models`, `languages`, `jobs`, `config`, `doctor`.
 
 ## Models
 
@@ -78,6 +86,64 @@ explicit `--model`, the first id from `/v1/models` is used and reported.
 `--backend auto` picks vLLM on a CUDA host when it imports, otherwise
 transformers. Explicit `--device cuda:N` (including `cuda:0`) overrides
 `CUDA_VISIBLE_DEVICES` before torch is imported.
+
+### Streaming
+
+`qasr stream` is vLLM-only and runs a single local stream. Remote
+(`--server`), transformers and other backends are rejected with exit 4.
+
+```bash
+qasr stream --input a.wav --emit jsonl          # cumulative JSONL snapshots
+qasr stream --input a.wav --emit text           # TTY: overwrite one line
+qasr stream --input mic                         # 16 kHz mono (needs [mic])
+arecord -q -f S16_LE -r 16000 -c 1 | qasr stream --input stdin --pcm s16le
+```
+
+`--input` accepts one local file, `mic` or `stdin`; directories, globs, URLs
+and `-` are rejected. stdin must be raw 16-bit little-endian PCM at 16 kHz
+(`--pcm s16le`); `--sample-rate` and `--channels` (1 or 2) apply to stdin
+only. `--chunk-ms` (100–10000, multiple of 10) controls the decode chunk;
+microphone capture blocks are fixed at 100 ms. `--realtime` paces file input
+in wall-clock time, subtracting each chunk's processing time from the budget.
+
+Snapshots are cumulative (`text`, `language`, `audio_s`, `elapsed_s`, `seq`);
+the final snapshot has `is_final: true`. `--emit jsonl` is the machine
+format and is incompatible with global `--json`. `--max-stream-seconds`
+(default 3600) ends the run with one `ok:false` quality snapshot (exit 5);
+it is a run limit, not a transcription-quality judgement. Ctrl-C flushes the
+model tail, emits a final snapshot and exits 130. Errors after streaming has
+started are emitted as a terminal error snapshot.
+
+### Shell completion
+
+```bash
+qasr completion bash > ~/.qasr-completion.bash   # source it from ~/.bashrc
+qasr completion zsh  > ~/.qasr-completion.zsh    # source it from ~/.zshrc
+qasr completion fish > ~/.config/fish/completions/qasr.fish
+```
+
+Scripts are generated from the live argparse parser, so they cover every
+top-level command and long option without a second hand-maintained list.
+Output is plain text with exactly one trailing newline.
+
+### Fine-tuning data lint
+
+`qasr finetune lint-jsonl` validates the official SFT JSONL format without
+importing torch/datasets or decoding audio:
+
+```bash
+qasr finetune lint-jsonl train.jsonl
+qasr finetune lint-jsonl train.jsonl --json --strict
+```
+
+Each non-empty line must be a JSON object with non-empty `audio` and `text`
+strings and an optional string `prompt`. Relative `audio` paths resolve
+against the JSONL file's directory. A `language <Name><asr_text>` prefix must
+use a known LID label (including dialect labels) or `None`, with non-empty
+body text. Unknown fields and duplicate resolved audio paths are warnings;
+`--strict` upgrades them to errors. `--no-check-files` skips existence and
+readability checks. Blank lines are ignored. Exit codes: 0 clean (warnings
+allowed unless `--strict`), 4 for errors or an unreadable file.
 
 ### Alignment JSON
 
@@ -177,7 +243,10 @@ Environment: `QASR_HOME`, `QASR_MODEL`, `QASR_MODEL_DIR`, `QASR_BACKEND`,
 - Local inference runs one job at a time; `--jobs` controls remote concurrency
   only. Use `--batch-size` for local micro-batching.
 - Zero-sample audio succeeds with empty text and `language: null`.
-- `--jsonl` is only meaningful for `transcribe`; other commands reject it.
-- Remote timestamps/alignment and streaming are out of scope.
+- `--jsonl` is only meaningful for `transcribe`; streaming uses `--emit jsonl`.
+- Remote timestamps/alignment and streaming are out of scope; `qasr stream`
+  needs a local vLLM backend.
+- vLLM (and therefore `qasr stream`) is Linux + CUDA only; macOS has no vLLM.
+- `qasr finetune` only lints data. It does not build datasets or train models.
 
 See `DESIGN.md` for the full contract and `P0-TASKS.md` for the milestone plan.

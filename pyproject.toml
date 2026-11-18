@@ -19,6 +19,8 @@ local = ["qwen-asr==0.0.6", "torch>=2.4"]
 hf = ["huggingface_hub>=0.24"]
 modelscope = ["modelscope>=1.15"]
 vllm = ["qwen-asr[vllm]==0.0.6"]
+mic = ["sounddevice>=0.4"]
+all = ["qasr-cli[local,mic,hf,modelscope]"]
 dev = ["pytest>=8", "ruff", "mypy", "jsonschema"]
 
 [project.scripts]
