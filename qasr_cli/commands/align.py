@@ -74,7 +74,17 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         )
 
     text = _read_text(ns)
-    raw_language = getattr(ns, "language", None) or cfg.get("language") or "auto"
+    if not text.strip():
+        raise InputError("reference text is empty", hint="pass --text/--text-file/--srt")
+
+    raw_language = getattr(ns, "language", None)
+    if raw_language is None and cfg.source_of("language") != "default":
+        raw_language = cfg.get("language")
+    if raw_language is None:
+        raise UsageError(
+            "align requires --language",
+            hint="one of " + ", ".join(ALIGNABLE) + " (or 'auto' for script detection)",
+        )
     if str(raw_language).strip().casefold() == "auto":
         language = detect_script_language(text)
         ctx.log(f"align: detected language {language} from script")
@@ -91,16 +101,23 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         raise UsageError("--out-dir and --output are mutually exclusive")
     if output and output != "-" and len(formats) > 1:
         raise UsageError("--output supports exactly one format", hint="use --out-dir")
+    if len(formats) > 1 and out_dir is None and not output:
+        raise UsageError("multiple formats require --out-dir",
+                         hint="write files with -o DIR")
 
     if ctx.json_mode:
         stdout_mode = "json"
     elif output == "-" or (out_dir is None and not output):
-        if len(formats) > 1 and not ctx.json_mode:
-            raise UsageError("multiple formats require --out-dir",
-                             hint="or pass --json for a single JSON document")
         stdout_mode = "content"
     else:
         stdout_mode = "none"
+
+    coverage_min = getattr(ns, "coverage_min", None)
+    if coverage_min is None:
+        coverage_min = 0.5
+    coverage_min = float(coverage_min)
+    if not 0.0 <= coverage_min <= 1.0:
+        raise UsageError("--coverage-min must be between 0 and 1")
 
     aligner = resolve_aligner(cfg.get("aligner"), cfg, required=not ctx.dry_run)
     if aligner is None or aligner.path is None:
@@ -113,10 +130,6 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         cache = FingerprintCache()
         fingerprint = cache.dir_fingerprint(aligner.path)
         cache.flush()
-
-    coverage_min = getattr(ns, "coverage_min", None)
-    if coverage_min is None:
-        coverage_min = 0.5
 
     item = InputItem(id=sanitize_id(Path(str(audio)).stem), source=str(audio),
                      path=Path(str(audio)).expanduser().resolve(), origin="file")
