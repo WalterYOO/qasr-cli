@@ -106,11 +106,13 @@ UV_HTTP_TIMEOUT=300 uv run --no-sync pytest -q review_tests_p1
 
 ## 6. gpu06 验收（协调者执行）
 
-本机不连接、不传输文件到 gpu06。以下证据由协调者在 gpu06（HEAD `26dcc66`）
-执行并提供：
+本机不连接、不传输文件到 gpu06。以下证据由协调者在 gpu06（实现 HEAD
+`1f7788f`；其后 `3df825e` 仅改模型缺失文案，stream 代码相同；模型 1.7B，
+CUDA0，`--gpu-memory-utilization 0.3`）执行并提供：
 
 - **file 200s**：rc0，101 行，`seq` 0..100，`is_final` 仅一次；最终
-  `audio_s=200.0`，elapsed 28.99s，English，text 2703 字符。
+  `audio_s=200.0`，elapsed 75.17s（首条快照 46.61s，按契约含模型加载），
+  English，text 2703 字符。
 - **stdin s16le 同一音频**：rc0，101 行，`seq`/final 语义相同，
   `audio_s=200.0`，English，text 与 file 输入完全一致（2703 字符）。
 - **cap=5s**：rc5；2 条 `ok:true` 非最终快照 + 1 条
@@ -122,10 +124,11 @@ UV_HTTP_TIMEOUT=300 uv run --no-sync pytest -q review_tests_p1
 - **中文 4.2s**：`--language zh` + context + `--chunk-ms 1000 --realtime`
   → rc0，5 行，`seq`/`audio_s` 单调，`language=Chinese`，最终文本与 P1 一致，
   elapsed 6.4s。
-- **mic（无 sounddevice，util 0.3）**：rc4 + mic hint；首轮验收发现当时是在
-  vLLM 引擎加载（约 60s）后才报错。`ac526bb` 已把 sounddevice 预检前移到
-  `resolve_model`/`ensure_loaded` 之前，待协调者在 gpu06 复验应无 vLLM
-  引擎日志。
+- **mic（无 sounddevice）**：`ac526bb` 把 sounddevice 预检前移到模型解析前；
+  gpu06 复验（HEAD `89c1222`）rc4、WALL=0.17s，stderr 无 vLLM
+  EngineCore/architecture 日志，仅 mic 安装 hint。
+- **缺失模型**：`--backend vllm --model missing/model` → rc3（能力检查之后）；
+  **文件不存在** → rc4。
 
 ## 7. 限制
 
