@@ -226,3 +226,63 @@ def test_config_show_includes_window_keys(capsys):
         "window_seconds", "window_overlap", "max_chunk_seconds",
     ):
         assert key in payload["config"], key
+
+
+@pytest.mark.parametrize("target", ["../evil", "/tmp/x", "a/b"])
+def test_jobs_show_rejects_non_id_paths(capsys, target):
+    code = main(["jobs", "show", target, "--json"])
+    assert code == 4
+    capsys.readouterr()
+
+
+def test_jobs_show_does_not_read_outside_index(capsys, tmp_path):
+    evil = qasr_home() / "jobs" / ".." / "evil.json"
+    evil.parent.mkdir(parents=True, exist_ok=True)
+    (qasr_home() / "evil.json").write_text(
+        json.dumps({"job_id": "evil", "out_dir": "/tmp"})
+    )
+    code = main(["jobs", "show", "../evil", "--json"])
+    assert code == 4
+    capsys.readouterr()
+
+
+def test_models_rm_rejects_symlinked_alias(capsys, model_factory):
+    import os
+
+    model_factory("Qwen3-ASR-1.7B")
+    real = qasr_home() / "models" / "Qwen3-ASR-1.7B"
+    link = qasr_home() / "models" / "my-alias"
+    if link.exists():
+        link.unlink()
+    os.symlink(real, link)
+    code = main(["models", "rm", "my-alias", "--yes", "--json"])
+    assert code == 2
+    capsys.readouterr()
+    assert real.is_dir()
+    assert link.is_symlink()
+
+
+def test_models_rm_rejects_symlinked_path(capsys, model_factory, tmp_path):
+    import os
+
+    model_factory("Qwen3-ASR-1.7B")
+    real = qasr_home() / "models" / "Qwen3-ASR-1.7B"
+    link = tmp_path / "linked-model"
+    os.symlink(real, link)
+    code = main(["models", "rm", str(link), "--yes", "--json"])
+    assert code == 2
+    capsys.readouterr()
+    assert real.is_dir()
+
+
+def test_models_rm_rejects_root_and_nested(capsys, model_factory):
+    model_factory("Qwen3-ASR-1.7B")
+    root = qasr_home() / "models"
+    code = main(["models", "rm", str(root), "--yes", "--json"])
+    assert code == 2
+    capsys.readouterr()
+    nested = root / "Qwen3-ASR-1.7B" / "sub"
+    nested.mkdir()
+    code = main(["models", "rm", str(nested), "--yes", "--json"])
+    assert code == 2
+    capsys.readouterr()

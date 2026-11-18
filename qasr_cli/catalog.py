@@ -708,7 +708,25 @@ def remove_model(
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     """Delete a managed model directory under ``models_root``."""
+    # Check the user-supplied candidate for a symlink *before* resolve_model
+    # canonicalises it: otherwise a symlinked alias would be silently resolved
+    # to the real directory and we would delete that instead.
+    import os
     import sys
+
+    root_path = models_root(config)
+    spec = spec_for(value)
+    if spec is not None:
+        candidate = root_path / spec.alias
+    elif os.sep in value or (os.altsep and os.altsep in value):
+        candidate = Path(value).expanduser()
+    else:
+        candidate = root_path / value
+    if os.path.islink(candidate):
+        raise UsageError(
+            f"refusing to remove symlinked model directory: {candidate}",
+            hint="remove the link manually; qasr only deletes managed directories",
+        )
 
     resolved = resolve_model(value, config)
     alias = resolved.alias or resolved.value

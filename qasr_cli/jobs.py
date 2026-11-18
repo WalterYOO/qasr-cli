@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import tempfile
 import time
@@ -433,15 +434,25 @@ def list_jobs(limit: Optional[int] = None) -> List[Dict[str, Any]]:
     return records
 
 
+JOB_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+
+
 def find_job(target: str) -> Dict[str, Any]:
-    """Look up a job by id or by its registered output directory."""
+    """Look up a job by id or by its registered output directory.
+
+    A job id must match the exact 16-hex-character format written by
+    ``register_job``; anything else is treated only as an output directory, so
+    user input can never be concatenated into a path inside the job index.
+    """
     text = str(target or "").strip()
     if not text:
         raise InputError("job id or output directory is required")
     root = _jobs_root()
-    if (root / f"{text}.json").is_file():
-        record = json.loads((root / f"{text}.json").read_text(encoding="utf-8"))
-        return record
+    if JOB_ID_RE.fullmatch(text):
+        path = root / f"{text}.json"
+        if path.is_file():
+            record = json.loads(path.read_text(encoding="utf-8"))
+            return record
     resolved = Path(text).expanduser().resolve()
     for record in _read_job_records():
         if Path(str(record.get("out_dir") or "")).resolve() == resolved:
