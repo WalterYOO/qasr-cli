@@ -127,6 +127,7 @@ tests/
 - 如果 `/v1/audio/transcriptions` 返回 404/405（服务端未暴露该端点），回退到 chat completions（无 context 版本）一次并 warning；同一进程缓存该降级决定。当前 gpu06 端点存在，正常不会触发。
 - 远程 capability：`--timestamps`、`--granularity`、`align --server`、`stream`（P2）→ 退出 4，message 指明“服务端不返回时间戳/无对齐端点”。
 - 音频读取：本地路径直接 multipart/读 bytes；URL 输入先走 P0 缓存下载；`audio_base64` manifest 输入直接解码。
+- **远程长音频必须客户端切块**（2026-11-18 gpu06 实测）：vLLM transcription 默认 `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB=25`，1h FLAC（47MB）直接 400 `Maximum file size exceeded`。因此 remote 转写默认 `--max-chunk-seconds 270`（16k mono WAV 约 8.6MB，安全），复用 N4 的窗口规划/临时 WAV/文本拼接；`--max-chunk-seconds > 600` 在 remote 下降到 600 并 warning（避免超 25MB）。文档说明可调服务端环境变量，但 qasr 不依赖它。
 - token：`Authorization: Bearer $QASR_SERVE_TOKEN`；日志与错误 details 不包含 header。
 
 **T2.2 超时、重试、错误映射**
@@ -191,6 +192,7 @@ tests/
   - 用 `long_audio.plan_windows` 规划；按窗口读取音频（soundfile 块读，mono）、转写；时间戳窗口结果按核心区裁剪并加 `audio_start` 偏移。
   - 纯文本窗口结果拼接时处理边界：相邻窗口重叠区只保留核心区对应文本；无法精确切词时保留前窗结果并在 warning 中说明（不得重复整段）。
   - 窗口级 checkpoint：`<out-dir>/.qasr/chunks/<job_key>/<index>.json`（原子写）；`--resume` 复用完整 chunk；`--overwrite` 忽略/清理；最终输出仍走 P0 原子写。
+- **remote 同样走客户端切块**：默认 270s、上限 600s（见 T2.1 的 25MB 限制）；每窗写临时 16k mono WAV 上传，按输入顺序拼接文本；chunk checkpoint 与本地一致。
 - 单窗口 ≤180s 时行为与 P0 完全一致（不得回归）。
 - `--timestamps` 的窗口结果 `segments` 必须全局绝对时间；`timestamp_source` 仍为 `forced_aligner`。
 
