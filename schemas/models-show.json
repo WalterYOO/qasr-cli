@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/models-show.json",
+  "title": "qasr models show",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "alias", "value", "present", "status"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"const": "models"},
+    "action": {"enum": ["show", "rm"]},
+    "alias": {"type": ["string", "null"]},
+    "value": {"type": "string"},
+    "repo": {"type": ["string", "null"]},
+    "kind": {"type": "string"},
+    "path": {"type": ["string", "null"]},
+    "present": {"type": "boolean"},
+    "source": {"type": "string"},
+    "status": {"type": "string"},
+    "size_bytes": {"type": ["integer", "null"]},
+    "file_count": {"type": ["integer", "null"]},
+    "fingerprint": {"type": ["string", "null"]},
+    "source_json": {"type": ["object", "null"]},
+    "checks": {"type": "array", "items": {"type": "object"}},
+    "removed": {"type": "boolean"},
+    "dry_run": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}

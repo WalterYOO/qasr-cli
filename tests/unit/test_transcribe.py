@@ -436,3 +436,72 @@ def test_backend_fallback_is_reported_in_payload(monkeypatch, tmp_path, model_di
     payload = json.loads(result.stdout)
     assert payload["backend_fallback"] is True
     assert any("vllm unavailable" in warning for warning in payload["result"]["warnings"])
+
+
+def test_skip_existing_skips_without_backend(monkeypatch, tmp_path, model_dir):
+    wav = write_wav(tmp_path / "a.wav")
+    out = tmp_path / "out"
+    backend = FakeBackend()
+    _patch_backend(monkeypatch, backend)
+    core.run(_settings(model_dir, out_dir=out, formats=["txt"]), [_spec(wav)])
+    assert backend.calls == 1
+
+    called = []
+    monkeypatch.setattr(core, "build_transformers_backend", lambda *a, **k: called.append(1))
+    result = core.run(
+        _settings(model_dir, out_dir=out, formats=["txt"], skip_existing=True,
+                  stdout_mode="json"),
+        [_spec(wav)],
+    )
+    assert called == []
+    payload = json.loads(result.stdout)
+    assert payload["skipped"] is True
+    assert result.summary == {"total": 1, "ok": 0, "failed": 0, "skipped": 1}
+    assert result.exit_code == EXIT_OK
+
+
+def test_retry_reruns_retryable_failure_once(monkeypatch, tmp_path, model_dir):
+    from qasr_cli.errors import RuntimeFailure
+
+    wav = write_wav(tmp_path / "a.wav")
+    calls = []
+
+    class FlakyBackend(FakeBackend):
+        def transcribe(self, jobs, opts):
+            calls.append(1)
+            if len(calls) == 1:
+                error = RuntimeFailure("temporary")
+                error.retryable = True
+                raise error
+            return super().transcribe(jobs, opts)
+
+    monkeypatch.setattr(core, "build_transformers_backend", lambda *a, **k: FlakyBackend())
+    result = core.run(
+        _settings(model_dir, stdout_mode="json", retry_failed=True),
+        [_spec(wav)],
+    )
+    assert result.exit_code == EXIT_OK
+    assert len(calls) == 2
+    payload = json.loads(result.stdout)
+    assert payload["result"]["text"] == "text-a"
+    assert payload["attempts"] == 2
+
+
+def test_retry_is_not_used_for_non_retryable_errors(monkeypatch, tmp_path, model_dir):
+    from qasr_cli.errors import RuntimeFailure
+
+    wav = write_wav(tmp_path / "a.wav")
+    calls = []
+
+    class BrokenBackend(FakeBackend):
+        def transcribe(self, jobs, opts):
+            calls.append(1)
+            raise RuntimeFailure("permanent")
+
+    monkeypatch.setattr(core, "build_transformers_backend", lambda *a, **k: BrokenBackend())
+    result = core.run(
+        _settings(model_dir, stdout_mode="json", retry_failed=True),
+        [_spec(wav)],
+    )
+    assert result.exit_code == 3
+    assert len(calls) == 1

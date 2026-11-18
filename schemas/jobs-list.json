@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/jobs-list.json",
+  "title": "qasr jobs list",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "jobs"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"const": "jobs"},
+    "action": {"const": "list"},
+    "jobs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["job_id", "out_dir", "command", "total", "created_at", "updated_at", "state"],
+        "properties": {
+          "job_id": {"type": "string"},
+          "out_dir": {"type": "string"},
+          "command": {"type": "string"},
+          "total": {"type": "integer", "minimum": 0},
+          "created_at": {"type": "string"},
+          "updated_at": {"type": "string"},
+          "state": {"enum": ["present", "missing"]}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

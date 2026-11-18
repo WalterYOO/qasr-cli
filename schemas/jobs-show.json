@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/jobs-show.json",
+  "title": "qasr jobs show",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "job", "state", "counts", "out_dir", "state_path"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"const": "jobs"},
+    "action": {"const": "show"},
+    "job": {"type": "object"},
+    "state": {"enum": ["present", "missing"]},
+    "counts": {
+      "type": "object",
+      "required": ["pending", "running", "done", "failed", "skipped"],
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "first_error": {"type": ["object", "null"]},
+    "out_dir": {"type": "string"},
+    "state_path": {"type": "string"}
+  },
+  "additionalProperties": true
+}

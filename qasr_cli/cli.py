@@ -12,8 +12,10 @@ from typing import Any, Dict, Optional, Sequence
 
 from . import __version__
 from .commands import align as align_cmd
+from .commands import bench as bench_cmd
 from .commands import config as config_cmd
 from .commands import doctor as doctor_cmd
+from .commands import jobs as jobs_cmd
 from .commands import languages as languages_cmd
 from .commands import models as models_cmd
 from .commands import serve as serve_cmd
@@ -38,6 +40,8 @@ COMMAND_HANDLERS = {
     "doctor": doctor_cmd.handle,
     "config": config_cmd.handle,
     "serve": serve_cmd.handle,
+    "jobs": jobs_cmd.handle,
+    "bench": bench_cmd.handle,
 }
 
 CLI_CONFIG_KEYS = (
@@ -135,6 +139,12 @@ def _add_transcribe(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--continue-on-error", dest="continue_on_error", action="store_true",
                    default=True)
     p.add_argument("--fail-fast", dest="fail_fast", action="store_true", default=False)
+    p.add_argument("--stdin-list", dest="stdin_list", action="store_true", default=False,
+                   help="read input paths from stdin, one per line")
+    p.add_argument("--skip-existing", dest="skip_existing", action="store_true", default=False,
+                   help="skip inputs whose outputs already exist and are non-empty")
+    p.add_argument("--retry", dest="retry_failed", action="store_true", default=False,
+                   help="retry retryable failures once")
     p.add_argument("--no-progress", dest="no_progress", action="store_true", default=False)
 
 
@@ -178,6 +188,14 @@ def _add_models(sub: argparse._SubParsersAction) -> None:
     vp.add_argument("--full", action="store_true", default=False,
                     help="hash entire weight files")
 
+    shp = models_sub.add_parser("show", help="show one model in detail")
+    _add_common_flags(shp)
+    shp.add_argument("model_target", metavar="ALIAS")
+    rmp = models_sub.add_parser("rm", help="delete a managed local model")
+    _add_common_flags(rmp)
+    rmp.add_argument("model_target", metavar="ALIAS")
+    rmp.add_argument("--yes", action="store_true", default=False,
+                     help="skip the interactive confirmation")
     up = models_sub.add_parser("pull", help="download a model")
     _add_common_flags(up)
     up.add_argument("model_target", metavar="ALIAS")
@@ -207,11 +225,31 @@ def _add_serve(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--port", type=int, default=None)
 
 
+def _add_bench(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("bench", help="measure throughput (no accuracy claims)")
+    _add_common_flags(p)
+    p.add_argument("inputs", nargs="*", metavar="INPUT")
+    p.add_argument("--duration", type=float, default=10.0, metavar="SECONDS",
+                   help="synthetic audio length when no INPUT is given")
+    p.add_argument("--iterations", type=int, default=3, metavar="N")
+
+
 def _add_doctor(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("doctor", help="check the local runtime and models")
     _add_common_flags(p)
     p.add_argument("--strict", action="store_true", default=False,
                    help="exit 3 when the overall status is warn/fail")
+
+
+def _add_jobs(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("jobs", help="list or inspect batch jobs")
+    jobs_sub = p.add_subparsers(dest="jobs_command", metavar="<action>")
+    lp = jobs_sub.add_parser("list", help="list recorded jobs")
+    _add_common_flags(lp)
+    lp.add_argument("--limit", type=int, default=None, metavar="N")
+    sp = jobs_sub.add_parser("show", help="show one job's state")
+    _add_common_flags(sp)
+    sp.add_argument("job_target", metavar="JOB_ID|OUT_DIR")
 
 
 def _add_config(sub: argparse._SubParsersAction) -> None:
@@ -221,6 +259,18 @@ def _add_config(sub: argparse._SubParsersAction) -> None:
     _add_common_flags(sp)
     cp = config_sub.add_parser("path", help="print the active configuration file")
     _add_common_flags(cp)
+    gp = config_sub.add_parser("get", help="print one effective configuration value")
+    _add_common_flags(gp)
+    gp.add_argument("config_key", metavar="KEY")
+    sp = config_sub.add_parser("set", help="write one configuration value")
+    _add_common_flags(sp)
+    sp.add_argument("config_key", metavar="KEY")
+    sp.add_argument("config_value", metavar="VALUE")
+    scope = sp.add_mutually_exclusive_group()
+    scope.add_argument("--project", action="store_true", default=False,
+                       help="write <project>/.qasr/config.json")
+    scope.add_argument("--home", action="store_true", default=False,
+                       help="write QASR_HOME/config.json (default)")
 
 
 def build_parser() -> QasrParser:
@@ -240,6 +290,8 @@ def build_parser() -> QasrParser:
     _add_languages(sub)
     _add_doctor(sub)
     _add_config(sub)
+    _add_jobs(sub)
+    _add_bench(sub)
     return parser
 
 

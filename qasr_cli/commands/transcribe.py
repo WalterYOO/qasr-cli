@@ -100,6 +100,8 @@ def handle(ns: Any, ctx: CommandContext) -> int:
 
     if getattr(ns, "manifest", None) and getattr(ns, "inputs", None):
         raise UsageError("--manifest cannot be combined with positional inputs")
+    if getattr(ns, "stdin_list", False) and getattr(ns, "manifest", None):
+        raise UsageError("--stdin-list cannot be combined with --manifest")
 
     timestamps_default = bool(getattr(ns, "timestamps", False))
     granularity_default = getattr(ns, "granularity", None) or "sentence"
@@ -152,9 +154,19 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                                            language_default, timestamps_default,
                                            granularity_default, ns, cfg))
     else:
-        inputs = list(getattr(ns, "inputs", None) or [])
+        inputs = []
+        if getattr(ns, "stdin_list", False):
+            import sys
+
+            inputs.extend(
+                line.strip() for line in sys.stdin.read().splitlines() if line.strip()
+            )
+        inputs.extend(getattr(ns, "inputs", None) or [])
         if not inputs:
-            raise UsageError("no input given", hint="qasr transcribe INPUT... | --manifest FILE")
+            raise UsageError(
+                "no input given",
+                hint="qasr transcribe INPUT... | --stdin-list | --manifest FILE",
+            )
         expansion = expand_inputs(
             inputs,
             recursive=bool(getattr(ns, "recursive", False)),
@@ -196,8 +208,19 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     if getattr(ns, "resume", False) and out_dir is None:
         raise UsageError("--resume requires --out-dir",
                          hint="resume state lives in <out-dir>/.qasr/state.jsonl")
+    if getattr(ns, "skip_existing", False) and out_dir is None and not output:
+        raise UsageError("--skip-existing requires --out-dir or --output",
+                         hint="there are no target paths to check otherwise")
+    if getattr(ns, "retry_failed", False) and getattr(ns, "fail_fast", False):
+        raise UsageError("--retry cannot be combined with --fail-fast")
+    job_id = None
     if out_dir is not None and not ctx.dry_run:
         ensure_output_unlocked(out_dir)
+        from ..jobs import register_job
+
+        job_id = register_job(
+            out_dir, command="transcribe", total=len(specs) + len(spec_errors)
+        )
 
     if getattr(ns, "format", None):
         formats = _normalize_formats(ns.format, ["txt"])
@@ -250,7 +273,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
             stdout_mode = "jsonl"
         elif "json" in selected:
             stdout_mode = "json"
-        elif any(fmt in ("srt", "vtt") for fmt in selected):
+        elif any(fmt in ("srt", "vtt", "tsv", "md") for fmt in selected):
             stdout_mode = "subtitle"
         else:
             stdout_mode = "text"
@@ -263,7 +286,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                 "multiple formats require --out-dir or --output",
                 hint="write files with -o DIR, or pick a single format for stdout",
             )
-        if getattr(ns, "format", None) and selected[0] in ("srt", "vtt"):
+        if getattr(ns, "format", None) and selected[0] in ("srt", "vtt", "tsv", "md"):
             stdout_mode = "subtitle"
         elif getattr(ns, "format", None) and selected[0] == "jsonl":
             stdout_mode = "jsonl"
@@ -446,6 +469,8 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         overwrite=bool(getattr(ns, "overwrite", False)),
         continue_on_error=not bool(getattr(ns, "fail_fast", False)),
         fail_fast=bool(getattr(ns, "fail_fast", False)),
+        skip_existing=bool(getattr(ns, "skip_existing", False)),
+        retry_failed=bool(getattr(ns, "retry_failed", False)),
         offline=bool(cfg.get("offline")),
         max_chunk_seconds=max_chunk,
         jobs=jobs,
@@ -455,6 +480,10 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     )
 
     result = core.run(settings, specs, spec_errors, log=ctx.log, config=cfg)
+    if job_id is not None:
+        from ..jobs import update_job
+
+        update_job(job_id, exit_code=result.exit_code)
     ctx.emit(result.stdout)
     return result.exit_code
 

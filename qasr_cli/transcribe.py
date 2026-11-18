@@ -99,6 +99,7 @@ class ItemSpec:
     payload: Optional[Dict[str, Any]] = None
     outputs: List[Dict[str, Any]] = field(default_factory=list)
     metrics: Dict[str, Any] = field(default_factory=dict)
+    attempts: int = 1
 
     @property
     def id(self) -> str:
@@ -130,6 +131,8 @@ class TranscribeSettings:
     overwrite: bool = False
     continue_on_error: bool = True
     fail_fast: bool = False
+    skip_existing: bool = False
+    retry_failed: bool = False
     offline: bool = False
     max_chunk_seconds: float = 270.0
     jobs: int = 1
@@ -406,6 +409,35 @@ def _run_locked(
 
     pending: List[ItemSpec] = []
     for spec in valid:
+        if settings.skip_existing and _outputs_complete(spec, settings):
+            spec.skipped = True
+            spec.payload = item_payload(
+                command="transcribe",
+                input_info=_input_info(spec),
+                model_info=_model_info(settings),
+                result={"text": None, "skipped": True},
+                metrics={},
+                outputs=[
+                    {"format": fmt, "path": str(path)}
+                    for fmt, path in zip(spec.formats, _target_paths(spec, settings))
+                ],
+            )
+            spec.payload["skipped"] = True
+            if state_path is not None:
+                append_jsonl(
+                    state_path,
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "id": spec.id,
+                        "job_key": spec.job_key,
+                        "status": STATUS_SKIPPED,
+                        "outputs": spec.payload["outputs"],
+                        "error": None,
+                        "started_at": None,
+                        "finished_at": now_iso(),
+                    },
+                )
+            continue
         record = latest.get(spec.id)
         if settings.out_dir is not None and should_skip(
             record, spec.job_key, resume=settings.resume, overwrite=settings.overwrite
@@ -627,6 +659,7 @@ def _run_locked(
                 error=spec.error.to_dict(),
                 model_info=_model_info(settings),
             )
+            spec.payload["attempts"] = spec.attempts
             if state_path is not None:
                 append_jsonl(
                     state_path,
@@ -637,6 +670,7 @@ def _run_locked(
                         "status": STATUS_FAILED,
                         "outputs": [],
                         "error": spec.error.to_dict(),
+                        "attempts": spec.attempts,
                         "started_at": spec.started_at,
                         "finished_at": now_iso(),
                     },
@@ -733,6 +767,27 @@ def _run_locked(
     )
 
 
+def _attempt_item(spec: ItemSpec, settings: TranscribeSettings, fn: Any) -> Any:
+    """Run ``fn`` once, retrying a retryable failure a single time."""
+    started = time.perf_counter()
+    try:
+        return fn(), None, int((time.perf_counter() - started) * 1000)
+    except Exception as exc:  # noqa: BLE001 - translated by the caller
+        if (
+            settings.retry_failed
+            and spec.attempts < 2
+            and isinstance(exc, QasrError)
+            and exc.retryable
+        ):
+            spec.attempts += 1
+            started = time.perf_counter()
+            try:
+                return fn(), None, int((time.perf_counter() - started) * 1000)
+            except Exception as retried:  # noqa: BLE001
+                return None, retried, int((time.perf_counter() - started) * 1000)
+        return None, exc, int((time.perf_counter() - started) * 1000)
+
+
 def _process_group(
     group: List[ItemSpec],
     backend: Any,
@@ -753,6 +808,24 @@ def _process_group(
         )
         for spec in group
     ]
+    def run_group() -> Any:
+        return backend.transcribe(jobs, opts)
+
+    if len(group) == 1:
+        results, exc, elapsed_ms = _attempt_item(group[0], settings, run_group)
+        if exc is None:
+            result = results[0]
+        if exc is not None:
+            _fail_item(group[0], exc, settings, log, state_path=state_path,
+                       display_out_dir=display_out_dir)
+            return
+        _complete_item(
+            group[0], result, settings, log,
+            load_ms=load_ms, infer_ms=elapsed_ms,
+            state_path=state_path, display_out_dir=display_out_dir,
+        )
+        return
+
     started = time.perf_counter()
     try:
         results = backend.transcribe(jobs, opts)
@@ -767,27 +840,26 @@ def _process_group(
                 display_out_dir=display_out_dir,
             )
     except Exception as exc:  # noqa: BLE001 - fall back to one-by-one
-        if len(group) == 1:
-            _fail_item(group[0], exc, settings, log, state_path=state_path,
-                       display_out_dir=display_out_dir)
-            return
         log(f"batch of {len(group)} failed ({exc}); retrying item by item")
         for spec in group:
-            single_started = time.perf_counter()
-            try:
-                results = backend.transcribe(
+            def run_single(spec: ItemSpec = spec) -> Any:
+                return backend.transcribe(
                     [TranscribeJob(item=spec.item, info=spec.info,
                                    language=spec.language, context=spec.context)],
                     TranscribeOptions(timestamps=spec.timestamps,
                                       granularity=spec.granularity,
                                       max_new_tokens=opts.max_new_tokens),
                 )
-                elapsed = int((time.perf_counter() - single_started) * 1000)
-                _complete_item(spec, results[0], settings, log, load_ms=0,
-                               infer_ms=elapsed, state_path=state_path,
-                               display_out_dir=display_out_dir)
-            except Exception as inner:  # noqa: BLE001
+
+            results, inner, elapsed = _attempt_item(spec, settings, run_single)
+            if inner is None:
+                result = results[0]
+            if inner is not None:
                 _fail_item(spec, inner, settings, log, state_path=state_path,
+                           display_out_dir=display_out_dir)
+                continue
+            _complete_item(spec, result, settings, log, load_ms=0,
+                           infer_ms=elapsed, state_path=state_path,
                            display_out_dir=display_out_dir)
 
 
@@ -860,21 +932,22 @@ def _process_long_item(
     display_out_dir: Optional[str],
     state_lock: Optional[Any] = None,
 ) -> None:
-    started = time.perf_counter()
-    try:
-        result = _transcribe_long(backend, spec, settings, max_tokens)
-        elapsed = int((time.perf_counter() - started) * 1000)
-        _complete_item(
-            spec, result, settings, log,
-            load_ms=load_ms,
-            infer_ms=elapsed,
-            state_path=state_path,
-            display_out_dir=display_out_dir,
-            state_lock=state_lock,
-        )
-    except Exception as exc:  # noqa: BLE001 - reported per item
+    def run_long() -> Any:
+        return _transcribe_long(backend, spec, settings, max_tokens)
+
+    result, exc, elapsed = _attempt_item(spec, settings, run_long)
+    if exc is not None:
         _fail_item(spec, exc, settings, log, state_path=state_path,
                    display_out_dir=display_out_dir)
+        return
+    _complete_item(
+        spec, result, settings, log,
+        load_ms=load_ms,
+        infer_ms=elapsed,
+        state_path=state_path,
+        display_out_dir=display_out_dir,
+        state_lock=state_lock,
+    )
 
 
 def _chunk_dir(settings: TranscribeSettings, spec: ItemSpec) -> Optional[Path]:
@@ -1232,12 +1305,11 @@ def _run_remote_items(
     workers = max(1, min(int(settings.jobs or 1), len(pending)))
 
     def work(spec: ItemSpec) -> Any:
-        started = time.perf_counter()
-        try:
-            result = _transcribe_spec(backend, spec, settings, max_tokens)
-            return spec, result, None, int((time.perf_counter() - started) * 1000)
-        except Exception as exc:  # noqa: BLE001 - translated per item below
-            return spec, None, exc, int((time.perf_counter() - started) * 1000)
+        result, exc, elapsed = _attempt_item(
+            spec, settings,
+            lambda: _transcribe_spec(backend, spec, settings, max_tokens),
+        )
+        return spec, result, exc, elapsed
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(work, spec): spec for spec in pending}
@@ -1312,6 +1384,7 @@ def _complete_item(
     )
     if settings.backend_fallback:
         spec.payload["backend_fallback"] = True
+    spec.payload["attempts"] = spec.attempts
     if state_path is not None:
         if state_lock is None:
             _append_done(state_path, spec, outputs)
@@ -1331,6 +1404,7 @@ def _append_done(state_path: Path, spec: ItemSpec, outputs: List[Dict[str, Any]]
             "status": STATUS_DONE,
             "outputs": outputs,
             "error": None,
+            "attempts": spec.attempts,
             "started_at": spec.started_at,
             "finished_at": now_iso(),
         },
@@ -1352,6 +1426,25 @@ def _fail_item(
         error = RuntimeFailure(f"transcription failed for {spec.id}: {exc}")
     spec.error = error
     log(f"error {spec.id}: {error.message}")
+
+
+def _target_paths(spec: ItemSpec, settings: TranscribeSettings) -> List[Path]:
+    if settings.output and settings.output != "-":
+        return [Path(settings.output).expanduser()]
+    if settings.out_dir is None:
+        return []
+    return [
+        safe_output_path(settings.out_dir, f"{spec.output_base}.{fmt}")
+        for fmt in spec.formats
+    ]
+
+
+def _outputs_complete(spec: ItemSpec, settings: TranscribeSettings) -> bool:
+    """True when every requested output exists and is non-empty."""
+    paths = _target_paths(spec, settings)
+    if not paths:
+        return False
+    return all(path.is_file() and path.stat().st_size > 0 for path in paths)
 
 
 def _write_outputs(

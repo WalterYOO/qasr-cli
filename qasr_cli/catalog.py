@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from . import SCHEMA_VERSION
 from .config import Config, models_root, qasr_home, write_json_atomic
-from .errors import InputError, ModelError
+from .errors import InputError, ModelError, UsageError
 from .jobs import now_iso
 
 PULL_HINT = "qasr models pull {alias} --resume"
@@ -647,6 +647,8 @@ __all__ = [
     "find_partial_files",
     "models_list",
     "models_path",
+    "show_model",
+    "remove_model",
     "pull_model",
     "require_local",
     "resolve_aligner",
@@ -654,3 +656,111 @@ __all__ = [
     "spec_for",
     "verify_model",
 ]
+
+
+def show_model(value: str, config: Optional[Config] = None) -> Dict[str, Any]:
+    """Detailed single-model view used by ``qasr models show``."""
+    resolved = resolve_model(value, config)
+    verify = verify_model(resolved)
+    source_summary = None
+    if resolved.path is not None:
+        source_file = Path(resolved.path) / "source.json"
+        if source_file.is_file():
+            try:
+                raw = json.loads(source_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                raw = None
+            if isinstance(raw, dict):
+                source_summary = {
+                    key: raw.get(key)
+                    for key in ("source", "repo", "revision")
+                    if key in raw
+                }
+    file_count = None
+    if resolved.path is not None and Path(resolved.path).is_dir():
+        file_count = sum(1 for item in Path(resolved.path).rglob("*") if item.is_file())
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": True,
+        "command": "models",
+        "action": "show",
+        "alias": resolved.alias,
+        "value": resolved.value,
+        "repo": resolved.repo,
+        "kind": resolved.kind,
+        "path": str(resolved.path) if resolved.path else None,
+        "present": resolved.present,
+        "source": resolved.source,
+        "status": verify["status"],
+        "size_bytes": verify["size_bytes"],
+        "file_count": file_count,
+        "fingerprint": verify["fingerprint"],
+        "source_json": source_summary,
+        "checks": verify.get("checks", []),
+    }
+
+
+def remove_model(
+    value: str,
+    config: Optional[Config] = None,
+    *,
+    assume_yes: bool = False,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Delete a managed model directory under ``models_root``."""
+    import sys
+
+    resolved = resolve_model(value, config)
+    alias = resolved.alias or resolved.value
+    if resolved.path is None:
+        raise ModelError(f"model '{value}' is not present locally")
+    target = Path(resolved.path)
+    if target.is_symlink():
+        raise UsageError(f"refusing to remove symlinked model directory: {target}")
+    root = models_root(config).resolve()
+    try:
+        real = target.resolve(strict=True)
+    except OSError as exc:
+        raise ModelError(f"model '{value}' is not present locally") from exc
+    if real == root or root not in real.parents:
+        raise UsageError(
+            f"refusing to remove a non-managed directory: {target}",
+            hint=f"only directories under {root} are managed by qasr",
+        )
+    if real.parent != root:
+        raise UsageError(f"refusing to remove nested directory: {target}")
+
+    size = dir_size(real) or 0
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "ok": True,
+        "command": "models",
+        "action": "rm",
+        "alias": alias,
+        "value": resolved.value,
+        "kind": resolved.kind,
+        "present": True,
+        "status": "present",
+        "path": str(real),
+        "size_bytes": size,
+        "dry_run": bool(dry_run),
+        "removed": False,
+    }
+    if dry_run:
+        return payload
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            raise UsageError(
+                "refusing to delete without confirmation",
+                hint="pass --yes in non-interactive runs",
+            )
+        answer = input(f"remove {alias} at {real}? [y/N] ").strip().casefold()
+        if answer not in ("y", "yes"):
+            raise UsageError("aborted")
+    import shutil
+
+    shutil.rmtree(real)
+    payload["removed"] = True
+    payload["present"] = False
+    payload["status"] = "removed"
+    return payload

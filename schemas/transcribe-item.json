@@ -9,6 +9,7 @@
     "ok": {"type": "boolean"},
     "command": {"const": "transcribe"},
     "skipped": {"type": "boolean"},
+    "attempts": {"type": "integer", "minimum": 1},
     "input": {
       "type": "object",
       "required": ["id", "source"],

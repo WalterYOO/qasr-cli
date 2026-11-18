@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/bench.json",
+  "title": "qasr bench result",
+  "type": "object",
+  "required": ["schema_version", "ok", "command"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"const": "bench"},
+    "backend": {"enum": ["transformers", "vllm", "remote"]},
+    "device": {"type": "string"},
+    "dtype": {"type": "string"},
+    "model": {"type": "string"},
+    "load_s": {"type": ["number", "null"]},
+    "audio_s": {"type": ["number", "null"]},
+    "elapsed_s": {"type": ["number", "null"]},
+    "rtf": {"type": ["number", "null"]},
+    "iterations": {"type": "integer", "minimum": 1},
+    "peak_memory_mb": {"type": ["number", "null"]},
+    "synthetic": {"type": "boolean"},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "plan": {"type": "object"}
+  },
+  "additionalProperties": true
+}

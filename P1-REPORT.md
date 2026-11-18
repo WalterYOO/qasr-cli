@@ -1,7 +1,7 @@
 # qasr-cli P1 实现报告
 
 > 任务书：`P1-TASKS.md`（含 2026-11-18 a53859c 澄清）。
-> 状态：进行中（N1–N3 已完成，N4–N5 待做）。
+> 状态：N1–N5 已完成（N4 已通过 gpu06 复验）。
 
 ## 1. 里程碑对照
 
@@ -10,8 +10,8 @@
 | N1 | ✅ 完成 | `serve` 薄包装、全局 `--server`、`doctor --server`、token 边界 |
 | N2 | ✅ 完成 | 远程客户端、context/chat、并发与错误映射 |
 | N3 | ✅ 完成 | vLLM 后端与 auto 选择 |
-| N4 | ⏳ 待做 | 长音频窗口化、`align --language auto` |
-| N5 | ⏳ 待做 | 批量运维命令、tsv/md、schema/README |
+| N4 | ✅ 完成 | 长音频窗口化、`align --language auto` |
+| N5 | ✅ 完成 | stdin-list/skip-existing/retry、tsv/md、jobs/bench/config/models、schema/README |
 
 ## 2. 测试命令与结果
 
@@ -20,7 +20,7 @@
 
 ```bash
 uv run ruff check qasr_cli tests        # All checks passed
-UV_HTTP_TIMEOUT=300 uv run --no-sync pytest -q   # 257 passed, 6 skipped
+UV_HTTP_TIMEOUT=300 uv run --no-sync pytest -q   # 323 passed, 6 skipped
 ```
 
 集成测试（需要本机模型）使用：
@@ -29,9 +29,17 @@ UV_HTTP_TIMEOUT=300 uv run --no-sync pytest -q   # 257 passed, 6 skipped
 RUN_INTEGRATION=1 QASR_TEST_MODEL_DIR=... pytest -m integration
 ```
 
-## 3. GPU 实测
+## 3. GPU 实测（gpu06，由协调者执行；本机不操作服务器）
 
-待 N2/N3 完成后由协调者安排 gpu06 联调；本机不做 GPU 操作。
+- vLLM 后端：`EngineArgs` 无 `device` 参数，改为 `CUDA_VISIBLE_DEVICES`；
+  `VLLM_CONFIGURE_LOGGING=0` + handler/atexit 重定向后 stdout 为单行 JSON。
+- 远程 200s LibriVox `--timestamps`：rc=0，17 段单调，首段覆盖
+  "This is a LibriVox recording..."，`chunk_reference_match_low` 消失。
+- chunk resume：复制 chunk 到新 out-dir 后 `--resume`，chunk mtime 全未变，
+  墙钟 53.6s（仅模型加载 + canonical ASR），17 段一致。
+- 远程 1h、未传 `--model`：14 个 270s chunk，rc=0，单行 JSON，
+  model=qwen3-asr-1.7b，47,838 字符，wall 52s。
+- 1h `--timestamps` 验收由协调者单独执行回报。
 
 ## 4. 与 DESIGN / 任务书的偏差
 
@@ -86,7 +94,7 @@ Qwen3-ASR 输出；显式语言与解析结果不一致时 warning `server_ignor
 请求值的 repo/alias/basename → 仅一个 served model 且请求是已知 qasr alias
 （使用该 id 并 warning）；多模型无法匹配 → 退出 4 并列出可选 id。进程内缓存
 解析结果；`prepare()` 在并发 worker 启动前完成解析。payload 的 `model.id`
-仍记录用户请求的模型标识（服务端实际 id 见 warning/请求）。
+记录解析后的 served id（未显式配置 model 时由 `/v1/models` 首个模型决定并 warning）。
 
 ### 4.9 远程 408/429 错误码
 
@@ -108,7 +116,7 @@ transcription 404/405 降级后）就产生 `language_not_enforced_on_chat`；
 - `VLLMBackend` 通过 `Qwen3ASRModel.LLM(...)` 懒加载，参数含 `dtype`
   （fp32/fp16/bf16 → vLLM 字符串）、`gpu_memory_utilization`、`max_new_tokens`、
   `max_inference_batch_size`。vLLM 0.14 的 `EngineArgs` 不接受 `device`，因此
-  不传；显式 `--device cuda:N`（N>0）在 import torch/vllm **之前**写入
+  不传；显式 `--device cuda:N`（N≥0，含 `cuda:0`）在 import torch/vllm **之前**写入
   `CUDA_VISIBLE_DEVICES=N`（覆盖已有值，显式优先），并把内部请求设备改写为
   `cuda:0`；`auto`/`cuda` 不改环境变量。`--timestamps` 时把 forced aligner 一并传入，时间戳
   仍由 HF aligner 产生；`align` 命令同样复用 HF aligner。
@@ -122,12 +130,36 @@ transcription 404/405 降级后）就产生 `language_not_enforced_on_chat`；
 - `doctor` 增加 `backend` check，报告 selected 与 auto resolved（仅读安装元数据，
   不 import torch/vllm）。
 
+### 4.12 时间戳长音频的 canonical ASR 策略
+
+时间戳长音频采用「canonical 全文 ASR + 窗口 ASR 锚点 + 窗口 align」，而不是
+逐窗 ASR 文本拼接：全文 ASR 保证 `result.text` 与短音频一致、避免跨窗重复；
+`attribute_reference` 把 canonical 文本单调归属到窗口，再逐窗对齐并裁剪核心区。
+chunk checkpoint 覆盖窗口锚点与对齐结果，但 canonical 全文 ASR 每次 `--resume`
+仍会重跑（见已知限制/后续优化）。窗口归属按候选切片（`len(window)*3+200`）
+取首末匹配块链，允许窗口内少量插入/替换，ratio 为窗口匹配字符占比。
+
+### 4.13 P1 最终口径（评审确认项）
+
+- stdout 纯净：vLLM 日志（含 EngineCore 退出日志）只进 stderr；`--json`/`--jsonl`
+  在 stdout 只有规定行数。
+- CUDA：显式 `--device cuda:N`（含 `cuda:0`）在任何 torch 探测前覆盖
+  `CUDA_VISIBLE_DEVICES` 并改写内部设备为 `cuda:0`；auto 仅在探测可导入时选
+  vLLM。
+- 远程默认模型：未显式配置 model 时不发送本地默认 alias，由 `/v1/models`
+  取首个并 warning；解析结果回填 payload/state/chunk key。
+- fail-fast：退出码取首个错误（3/4/5），未尝试项标 skipped；只有非 fail-fast
+  且已有完成项时部分失败才是 6。
+- 凭据：`QASR_SERVE_TOKEN` 仅环境变量；错误 body/URL/reason 统一
+  `sanitize_text` 后进入 message/state。
+
 ## 5. 已知限制
 
 - 远程不返回时间戳，也不提供对齐端点（capability error，退出 4，且在发请求前拒绝）。
 - 远程 `--jobs` 默认 4、范围 1–32；state 的 running/done 追加已串行化，fail-fast
   取消排队任务并由收尾阶段补 skipped，不留下 running 记录。
-- 远程单文件 >25MB 仍直接拒绝；客户端切块（默认 270s）在 N4 接入。
+- 远程默认客户端切块 270s（上限 600s）；服务端 25MB 限制不再依赖用户手动切分。
+- 时间戳长音频的 canonical 全文 ASR 不进入 chunk checkpoint，`--resume` 会重跑。
 - vLLM 真机验收（gpu06）由协调者安排；本地只做假模块单测，未操作服务器。
 - `forced_aligner_kwargs` 中的 `dtype=torch.dtype` 在 qwen-asr 0.0.6 真机
   timestamps 路径仍待 gpu06 复核（走 HF AutoModel 参数，理论上接受）。
@@ -139,5 +171,8 @@ transcription 404/405 降级后）就产生 `language_not_enforced_on_chat`；
 - 假 OpenAI 服务与 serve/doctor 契约测试：`tests/contract/test_serve_doctor.py`
 - 远程客户端测试：`tests/contract/test_remote_client.py`（multipart/chat/降级/重试/并发/state/schema/重定向）
 - vLLM 假模块测试：`tests/unit/test_vllm_backend.py`；核心批量/fallback：`tests/unit/test_transcribe.py`
-- 长音频纯函数测试：N4 完成后补充 `tests/unit/test_long_audio.py`
+- 长音频：`tests/unit/test_long_audio.py`、`tests/unit/test_long_transcribe.py`
+- 批量/tsv/md/stdin-list：`tests/contract/test_p1_batch_contract.py`
+- jobs/bench/config/models：`tests/contract/test_p1_ops_contract.py`
+- 完整 schema：`schemas/bench.json`、`schemas/jobs-list.json`、`schemas/jobs-show.json`、`schemas/models-show.json`
 - 全量：`uv run pytest -q`；GPU：`RUN_INTEGRATION=1 ... pytest -m integration`

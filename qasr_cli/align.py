@@ -423,7 +423,7 @@ def run(
             stdout = json.dumps(payload, ensure_ascii=False)
         else:
             fmt = settings.formats[0]
-            if fmt in ("srt", "vtt"):
+            if fmt in ("srt", "vtt", "tsv", "md"):
                 stdout = render_format(
                     fmt, item=payload, result=None,
                     audio_duration_s=info.duration_s,

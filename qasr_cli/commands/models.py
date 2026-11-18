@@ -31,7 +31,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
 
     if action is None:
         raise UsageError("models requires an action",
-                         hint="list | path | verify | pull")
+                         hint="list | path | verify | show | rm | pull")
 
     target = getattr(ns, "model_target", None)
     if not target:
@@ -58,6 +58,33 @@ def handle(ns: Any, ctx: CommandContext) -> int:
             if payload.get("hint"):
                 print(f"hint: {payload['hint']}")
         return EXIT_OK if payload["status"] == "complete" else EXIT_MODEL
+
+    if action == "show":
+        payload = catalog.show_model(target, ctx.config)
+        if ctx.json_mode:
+            _emit(payload, ctx)
+        else:
+            for key in (
+                "alias", "repo", "kind", "path", "source", "status",
+                "size_bytes", "file_count", "fingerprint",
+            ):
+                print(f"{key}: {payload.get(key)}")
+        return EXIT_OK
+
+    if action == "rm":
+        payload = catalog.remove_model(
+            target,
+            ctx.config,
+            assume_yes=bool(getattr(ns, "yes", False)),
+            dry_run=bool(ctx.dry_run),
+        )
+        if ctx.json_mode:
+            _emit(payload, ctx)
+        elif payload["dry_run"]:
+            print(f"would remove {payload['alias']} ({payload['path']}, {payload['size_bytes']} bytes)")
+        else:
+            print(f"removed {payload['alias']} ({payload['size_bytes']} bytes)")
+        return EXIT_OK
 
     if action == "pull":
         payload = catalog.pull_model(

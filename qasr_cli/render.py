@@ -9,9 +9,11 @@ from . import SCHEMA_VERSION
 from .backends import AlignResult, TranscribeResult
 from .subtitles import Cue, build_cues, render_srt, render_vtt
 
-FORMATS = ("txt", "json", "jsonl", "srt", "vtt")
+FORMATS = ("txt", "json", "jsonl", "srt", "vtt", "tsv", "md")
 SUBTITLE_FORMATS = ("srt", "vtt")
 JSON_FORMATS = ("json", "jsonl")
+TABLE_FORMATS = ("tsv", "md")
+TSV_HEADER = ("id", "start", "end", "text", "language")
 
 
 def error_payload(
@@ -124,6 +126,74 @@ def subtitle_cues(result: TranscribeResult, audio_duration_s: Optional[float]) -
     return build_cues(segments, audio_duration_s=audio_duration_s)
 
 
+def _item_id(item: Dict[str, Any]) -> str:
+    info = item.get("input") or {}
+    value = info.get("id") or info.get("source") or ""
+    return str(value)
+
+
+def _item_language(item: Dict[str, Any]) -> str:
+    return str(item.get("language") or "")
+
+
+def _item_segments(
+    item: Dict[str, Any], result: Optional[TranscribeResult]
+) -> List[Any]:
+    if result is not None:
+        return list(result.segments)
+    payload = item.get("result") or {}
+    return list(payload.get("items") or [])
+
+
+def _field(seg: Any, name: str, default: Any = None) -> Any:
+    if isinstance(seg, dict):
+        return seg.get(name, default)
+    return getattr(seg, name, default)
+
+
+def _cell(value: Any) -> str:
+    """Escape tabs and newlines so one record stays on one TSV row."""
+    return " ".join(str(value or "").split())
+
+
+def render_tsv(item: Dict[str, Any], segments: Sequence[Any]) -> str:
+    lines = ["\t".join(TSV_HEADER)]
+    if segments:
+        for seg in segments:
+            lines.append(
+                "\t".join(
+                    [
+                        _cell(_item_id(item)),
+                        f"{float(_field(seg, 'start', 0.0)):.3f}",
+                        f"{float(_field(seg, 'end', 0.0)):.3f}",
+                        _cell(_field(seg, "text", "")),
+                        _cell(_item_language(item)),
+                    ]
+                )
+            )
+    else:
+        payload = item.get("result") or {}
+        text = payload.get("text") or ""
+        lines.append(
+            "\t".join([_cell(_item_id(item)), "", "", _cell(text), _cell(_item_language(item))])
+        )
+    return "\n".join(lines) + "\n"
+
+
+def render_markdown(item: Dict[str, Any], segments: Sequence[Any]) -> str:
+    lines = [f"## {_item_id(item)}", ""]
+    if segments:
+        for seg in segments:
+            lines.append(
+                f"- [{float(_field(seg, 'start', 0.0)):.3f} - "
+                f"{float(_field(seg, 'end', 0.0)):.3f}] {_field(seg, 'text', '')}"
+            )
+    else:
+        text = (item.get("result") or {}).get("text") or ""
+        lines.append(str(text))
+    return "\n".join(lines) + "\n"
+
+
 def render_format(
     fmt: str,
     *,
@@ -144,6 +214,10 @@ def render_format(
         return render_srt(list(cues or []))
     if fmt == "vtt":
         return render_vtt(list(cues or []))
+    if fmt == "tsv":
+        return render_tsv(item, _item_segments(item, result))
+    if fmt == "md":
+        return render_markdown(item, _item_segments(item, result))
     raise ValueError(f"unknown format: {fmt}")
 
 

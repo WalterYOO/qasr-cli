@@ -37,6 +37,9 @@ CONFIG_KEYS: tuple[str, ...] = (
     "server",
     "timeout",
     "retries",
+    "window_seconds",
+    "window_overlap",
+    "max_chunk_seconds",
 )
 
 DEFAULTS: Dict[str, Any] = {
@@ -57,6 +60,9 @@ DEFAULTS: Dict[str, Any] = {
     "server": None,
     "timeout": 300,
     "retries": 2,
+    "window_seconds": 180.0,
+    "window_overlap": 3.0,
+    "max_chunk_seconds": None,
 }
 
 ENV_KEYS: Dict[str, str] = {
@@ -224,6 +230,20 @@ def coerce_value(key: str, value: Any, source: str) -> Any:
         return _coerce_bool(value, key, source)
     if key in ("batch_size", "max_inference_batch_size", "jobs", "timeout", "retries"):
         return _coerce_int(value, key, source)
+    if key in ("window_seconds", "window_overlap", "max_chunk_seconds"):
+        if value is None and key == "max_chunk_seconds":
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"{source}: '{key}' must be a number") from exc
+        if key == "window_seconds" and not 10.0 <= number <= 180.0:
+            raise ConfigError(f"{source}: 'window_seconds' must be between 10 and 180")
+        if key == "window_overlap" and not 0.0 <= number <= 10.0:
+            raise ConfigError(f"{source}: 'window_overlap' must be between 0 and 10")
+        if key == "max_chunk_seconds" and not 10.0 <= number <= 1200.0:
+            raise ConfigError(f"{source}: 'max_chunk_seconds' must be between 10 and 1200")
+        return number
     if key == "context":
         return _coerce_context(value, key, source)
     if key == "format":

@@ -359,3 +359,91 @@ def should_skip(
         and record.get("job_key") == key
         and outputs_match(record.get("outputs"))
     )
+
+
+JOBS_DIRNAME = "jobs"
+
+
+def _jobs_root() -> Path:
+    from .config import qasr_home
+
+    return qasr_home() / JOBS_DIRNAME
+
+
+def register_job(
+    out_dir: str | os.PathLike, *, command: str, total: int
+) -> str:
+    """Record a batch run in ``QASR_HOME/jobs`` and return its job id."""
+    target = Path(out_dir).expanduser().resolve()
+    created = time.time()
+    job_id = hashlib.sha256(
+        f"{target}|{created}|{os.getpid()}".encode()
+    ).hexdigest()[:16]
+    now = now_iso()
+    record = {
+        "schema_version": SCHEMA_VERSION,
+        "job_id": job_id,
+        "out_dir": str(target),
+        "command": command,
+        "total": int(total),
+        "created_at": now,
+        "updated_at": now,
+    }
+    path = _jobs_root() / f"{job_id}.json"
+    atomic_write_text(path, json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+    return job_id
+
+
+def update_job(job_id: str, **fields: Any) -> None:
+    path = _jobs_root() / f"{job_id}.json"
+    if not path.is_file():
+        return
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    record.update(fields)
+    record["updated_at"] = now_iso()
+    atomic_write_text(path, json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+
+
+def _read_job_records() -> List[Dict[str, Any]]:
+    root = _jobs_root()
+    records: List[Dict[str, Any]] = []
+    if not root.is_dir():
+        return records
+    for path in root.glob("*.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict) and record.get("job_id"):
+            records.append(record)
+    return records
+
+
+def list_jobs(limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    records = _read_job_records()
+    records.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    for record in records:
+        state = Path(str(record.get("out_dir") or "")) / STATE_DIRNAME / STATE_FILENAME
+        record["state"] = "present" if state.is_file() else "missing"
+    if limit is not None:
+        records = records[:limit]
+    return records
+
+
+def find_job(target: str) -> Dict[str, Any]:
+    """Look up a job by id or by its registered output directory."""
+    text = str(target or "").strip()
+    if not text:
+        raise InputError("job id or output directory is required")
+    root = _jobs_root()
+    if (root / f"{text}.json").is_file():
+        record = json.loads((root / f"{text}.json").read_text(encoding="utf-8"))
+        return record
+    resolved = Path(text).expanduser().resolve()
+    for record in _read_job_records():
+        if Path(str(record.get("out_dir") or "")).resolve() == resolved:
+            return record
+    raise InputError(f"unknown job: {target}", hint="see 'qasr jobs list'")
