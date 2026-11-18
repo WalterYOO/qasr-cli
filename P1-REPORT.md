@@ -31,15 +31,27 @@ RUN_INTEGRATION=1 QASR_TEST_MODEL_DIR=... pytest -m integration
 
 ## 3. GPU 实测（gpu06，由协调者执行；本机不操作服务器）
 
-- vLLM 后端：`EngineArgs` 无 `device` 参数，改为 `CUDA_VISIBLE_DEVICES`；
-  `VLLM_CONFIGURE_LOGGING=0` + handler/atexit 重定向后 stdout 为单行 JSON。
-- 远程 200s LibriVox `--timestamps`：rc=0，17 段单调，首段覆盖
+验收基线：`8c7fee3`（N5 无行为变化）。
+
+- **1h timestamps**：`libri_1h.flac` 3599.84s，vLLM 0.6B + ForcedAligner，
+  21 个窗口，rc=0，wall=159.19s，649 段；时间单调、无重叠/倒退，
+  warnings=[], 末段 `end=3599.843`，stdout 恰好一行 JSON。
+- **1h align**：同一音频，参考文本取该次 canonical 输出，transformers 0.6B
+  + aligner，rc=0，wall=227.81s，coverage=0.9129，7682 个词级 item；
+  首词 1.04s、末词 `end=3599.843`；顶层 `language=English`、
+  `language_source=explicit`。
+- **align --language auto**（200s LibriVox，拉丁脚本）：LID probe 识别
+  English，`language_source=lid_probe`，coverage=1.0，466 items，rc=0。
+- **200s timestamps 修复复验**：rc=0，17 段单调，首段覆盖
   "This is a LibriVox recording..."，`chunk_reference_match_low` 消失。
-- chunk resume：复制 chunk 到新 out-dir 后 `--resume`，chunk mtime 全未变，
-  墙钟 53.6s（仅模型加载 + canonical ASR），17 段一致。
-- 远程 1h、未传 `--model`：14 个 270s chunk，rc=0，单行 JSON，
-  model=qwen3-asr-1.7b，47,838 字符，wall 52s。
-- 1h `--timestamps` 验收由协调者单独执行回报。
+- **chunk resume**：复制 chunk 到新 out-dir 后 `--resume`，chunk mtime 全未变
+  （确认复用），wall=53.59s（仅模型加载 + canonical ASR），输出 17 段一致。
+- **远程 1h**：`--server` 且未传 `--model`，14 个 270s 客户端切块，rc=0，
+  wall=52.17s，`model=qwen3-asr-1.7b`，47,838 字符，stdout 单行 JSON。
+- **远程能力边界**：`--timestamps` → rc=4 "does not return timestamps"；
+  `align --server` → rc=4；未知 model → rc=4 "server does not serve model"。
+- **vLLM stdout 纯净**：修复后 `--json` 输出恰好 1 行且 `json.loads` 成功，
+  EngineCore 日志只在 stderr。
 
 ## 4. 与 DESIGN / 任务书的偏差
 
@@ -165,6 +177,12 @@ chunk checkpoint 覆盖窗口锚点与对齐结果，但 canonical 全文 ASR �
   timestamps 路径仍待 gpu06 复核（走 HF AutoModel 参数，理论上接受）。
 - 远程 RTF 含网络时间，仅作记录，不作门禁。
 - `QASR_SERVE_TOKEN` 只从环境变量读取；不写入配置、state、jobs 或日志。
+
+### 4.14 `align` JSON 顶层语言字段
+
+`align` 的 `language` 与 `language_source`（`explicit` / `script` / `lid_probe`）
+位于 **JSON 顶层**，不在 `result` 内；`result` 只含 `items`/`coverage`/`warnings`。
+`transcribe` 的语言字段仍在 `result` 内。两者 schema 均向后兼容。
 
 ## 6. 审查入口
 

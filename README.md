@@ -79,6 +79,13 @@ explicit `--model`, the first id from `/v1/models` is used and reported.
 transformers. Explicit `--device cuda:N` (including `cuda:0`) overrides
 `CUDA_VISIBLE_DEVICES` before torch is imported.
 
+### Alignment JSON
+
+`qasr align --json` reports `language` and `language_source`
+(`explicit` / `script` / `lid_probe`) at the **top level** of the payload, not
+inside `result`; `result` holds `items`, `coverage` and `warnings`. In
+`transcribe` payloads the language fields stay inside `result`.
+
 ### Long audio
 
 Audio longer than `--max-chunk-seconds` (default 270 for plain text, 180 with
