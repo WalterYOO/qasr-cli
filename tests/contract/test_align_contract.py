@@ -241,6 +241,7 @@ def test_align_dry_run_reports_window_plan(monkeypatch, capsys, tmp_path, model_
     ])
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
+    validate("dry-run", payload)
     plan = payload["plan"]
     assert plan["window_seconds"] == 180.0
     assert len(plan["windows"]) == 2

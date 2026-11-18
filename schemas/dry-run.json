@@ -26,6 +26,24 @@
         "coverage_min": {"type": "number"},
         "max_new_tokens": {"type": "integer"},
         "outputs": {"type": "array", "items": {"type": "object"}},
+        "windows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "index", "audio_start_s", "audio_end_s",
+              "core_start_s", "core_end_s"
+            ],
+            "properties": {
+              "index": {"type": "integer", "minimum": 0},
+              "audio_start_s": {"type": "number", "minimum": 0},
+              "audio_end_s": {"type": "number", "minimum": 0},
+              "core_start_s": {"type": "number", "minimum": 0},
+              "core_end_s": {"type": "number", "minimum": 0}
+            },
+            "additionalProperties": true
+          }
+        },
         "errors": {"type": "array", "items": {"type": "object"}}
       },
       "additionalProperties": true
