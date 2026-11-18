@@ -73,6 +73,11 @@ qasr [--backend vllm] stream --input a.wav --language zh --context "..." --emit 
   显式 `transformers`/`remote`/配置了 `--server` → 4，hint 指向
   `uv tool install "qasr-cli[vllm,mic]"`。
 - 模型解析、离线、指纹、错误语义与 `transcribe` 一致；缺失模型 → 3。
+- 全局 `--device` / `--dtype` / `--gpu-memory-utilization` 与 `transcribe`/`bench`
+  同语义：显式设备映射到 `CUDA_VISIBLE_DEVICES`，`--gpu-memory-utilization`
+  必须透传给 `VLLMBackend`（共享 GPU 上不传会按 0.9 OOM）。
+- `--json` 只影响错误 envelope 与人类模式；与 `--emit jsonl` 同用是允许的
+  （不额外输出 envelope），与 `--emit text` 同用 → 2。
 - `--realtime` 只允许 file；与 stdin/mic 同用 → 2。
 - `--emit jsonl` 与人类模式都由同一状态机产出，不允许两条代码路径。
 
