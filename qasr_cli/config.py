@@ -35,6 +35,8 @@ CONFIG_KEYS: tuple[str, ...] = (
     "model_dir",
     "offline",
     "server",
+    "timeout",
+    "retries",
 )
 
 DEFAULTS: Dict[str, Any] = {
@@ -53,6 +55,8 @@ DEFAULTS: Dict[str, Any] = {
     "model_dir": None,
     "offline": False,
     "server": None,
+    "timeout": 300,
+    "retries": 2,
 }
 
 ENV_KEYS: Dict[str, str] = {
@@ -218,7 +222,7 @@ def coerce_value(key: str, value: Any, source: str) -> Any:
     """Type-check a configuration value from any layer."""
     if key == "offline":
         return _coerce_bool(value, key, source)
-    if key in ("batch_size", "max_inference_batch_size", "jobs"):
+    if key in ("batch_size", "max_inference_batch_size", "jobs", "timeout", "retries"):
         return _coerce_int(value, key, source)
     if key == "context":
         return _coerce_context(value, key, source)

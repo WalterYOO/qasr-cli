@@ -1,23 +1,26 @@
 # qasr-cli P1 实现报告
 
 > 任务书：`P1-TASKS.md`（含 2026-11-18 a53859c 澄清）。
-> 状态：进行中（N1 已完成，N2–N5 待做）。
+> 状态：进行中（N1、N2 已完成，N3–N5 待做）。
 
 ## 1. 里程碑对照
 
 | 里程碑 | 状态 | 内容 |
 |---|---|---|
 | N1 | ✅ 完成 | `serve` 薄包装、全局 `--server`、`doctor --server`、token 边界 |
-| N2 | ⏳ 进行中 | 远程客户端、context/chat、并发与错误映射 |
+| N2 | ✅ 完成 | 远程客户端、context/chat、并发与错误映射 |
 | N3 | ⏳ 待做 | vLLM 后端与 auto 选择 |
 | N4 | ⏳ 待做 | 长音频窗口化、`align --language auto` |
 | N5 | ⏳ 待做 | 批量运维命令、tsv/md、schema/README |
 
 ## 2. 测试命令与结果
 
+> 本机 lock 中的 numpy 2.2.6 下载受网络阻塞，P1 期间统一使用
+> `UV_HTTP_TIMEOUT=300 uv run --no-sync ...`；这不是用户 README 命令。
+
 ```bash
 uv run ruff check qasr_cli tests        # All checks passed
-uv run pytest -q                        # 217 passed, 6 skipped
+UV_HTTP_TIMEOUT=300 uv run --no-sync pytest -q   # 242 passed, 6 skipped
 ```
 
 集成测试（需要本机模型）使用：
@@ -76,15 +79,42 @@ Qwen3-ASR 输出；显式语言与解析结果不一致时 warning `server_ignor
 `--timestamps` + `--max-chunk-seconds > 180` → 退出 4；纯文本使用 270s 只用于
 进度/内存/checkpoint，不作为 aligner 窗口。
 
+### 4.8 远程 served model id（gpu06 实测）
+
+服务端常用 `--served-model-name` 重命名模型，直接把 qasr alias 映射成 HF repo
+会 404。远程始终先 `GET /v1/models` 并按以下顺序匹配：精确 served id →
+请求值的 repo/alias/basename → 仅一个 served model 且请求是已知 qasr alias
+（使用该 id 并 warning）；多模型无法匹配 → 退出 4 并列出可选 id。进程内缓存
+解析结果；`prepare()` 在并发 worker 启动前完成解析。payload 的 `model.id`
+仍记录用户请求的模型标识（服务端实际 id 见 warning/请求）。
+
+### 4.9 远程 408/429 错误码
+
+DESIGN 的粗粒度规则是普通 4xx→4；任务书澄清 408/429 属于可重试传输错误。
+实现：408/429 与 5xx/超时/连接错误 → `RuntimeFailure`（退出 3，retryable）；
+其他 4xx（含 401/403、400、422）→ `InputError`（退出 4）。重试总次数为
+`1 + retries`；语言 400 去掉 language 仅额外一次，不占 retries。
+
+### 4.10 `language_source: server` 与 chat 语言
+
+远程结果新增 `language_source="server"`（同步更新 `schemas/transcribe-item.json`
+enum）。transcription 与 chat 响应都本地解析 `language X<asr_text>` 前缀。
+chat 路径无法强制语言：只要实际使用 chat 且用户显式给了 `--language`（包括
+transcription 404/405 降级后）就产生 `language_not_enforced_on_chat`；
+解析语言与请求语言不一致（且可映射 ISO）时产生 `server_ignored_language`。
+
 ## 5. 已知限制
 
-- 远程不返回时间戳，也不提供对齐端点（capability error，退出 4）。
+- 远程不返回时间戳，也不提供对齐端点（capability error，退出 4，且在发请求前拒绝）。
+- 远程 `--jobs` 默认 4、范围 1–32；state 的 running/done 追加已串行化，fail-fast
+  取消排队任务并由收尾阶段补 skipped，不留下 running 记录。
+- 远程单文件 >25MB 仍直接拒绝；客户端切块（默认 270s）在 N4 接入。
 - 远程 RTF 含网络时间，仅作记录，不作门禁。
 - `QASR_SERVE_TOKEN` 只从环境变量读取；不写入配置、state、jobs 或日志。
 
 ## 6. 审查入口
 
 - 假 OpenAI 服务与 serve/doctor 契约测试：`tests/contract/test_serve_doctor.py`
-- 远程客户端测试：N2 完成后补充 `tests/contract/test_remote_*.py`
+- 远程客户端测试：`tests/contract/test_remote_client.py`（multipart/chat/降级/重试/并发/state/schema/重定向）
 - 长音频纯函数测试：N4 完成后补充 `tests/unit/test_long_audio.py`
 - 全量：`uv run pytest -q`；GPU：`RUN_INTEGRATION=1 ... pytest -m integration`

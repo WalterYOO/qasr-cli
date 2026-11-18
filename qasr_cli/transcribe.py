@@ -120,6 +120,10 @@ class TranscribeSettings:
     continue_on_error: bool = True
     fail_fast: bool = False
     offline: bool = False
+    jobs: int = 1
+    remote_url: Optional[str] = None
+    remote_timeout: float = 300.0
+    remote_retries: int = 2
 
 
 @dataclass
@@ -439,27 +443,48 @@ def _run_locked(
     stop_early = settings.fail_fast and any(spec.error is not None for spec in specs)
 
     if pending and not stop_early:
-        try:
-            backend = build_transformers_backend(
-                settings.model_path,
-                aligner_path=settings.aligner_path,
-                device=settings.device,
-                dtype=settings.dtype,
-                attn_implementation=settings.attn_implementation,
-                max_inference_batch_size=settings.max_inference_batch_size,
-                max_new_tokens=max_tokens,
-                offline=settings.offline,
+        started = time.perf_counter()
+        if settings.backend_name == "remote":
+            from .remote import RemoteBackend, RemoteOptions
+
+            backend = RemoteBackend(
+                RemoteOptions(
+                    base_url=str(settings.remote_url or ""),
+                    model=settings.model_id,
+                    timeout=settings.remote_timeout,
+                    retries=settings.remote_retries,
+                    log=log,
+                )
             )
             ensure = getattr(backend, "ensure_loaded", None)
-            started = time.perf_counter()
             if callable(ensure):
                 ensure(need_align=any(spec.timestamps and not spec.empty for spec in pending))
+            prepare = getattr(backend, "prepare", None)
+            if callable(prepare):
+                prepare()
             load_ms = int((time.perf_counter() - started) * 1000)
-            log(f"model loaded in {load_ms} ms")
-        except QasrError:
-            raise
-        except Exception as exc:
-            raise RuntimeFailure(f"failed to load model: {exc}") from exc
+            log(f"remote backend ready ({load_ms} ms)")
+        else:
+            try:
+                backend = build_transformers_backend(
+                    settings.model_path,
+                    aligner_path=settings.aligner_path,
+                    device=settings.device,
+                    dtype=settings.dtype,
+                    attn_implementation=settings.attn_implementation,
+                    max_inference_batch_size=settings.max_inference_batch_size,
+                    max_new_tokens=max_tokens,
+                    offline=settings.offline,
+                )
+                ensure = getattr(backend, "ensure_loaded", None)
+                if callable(ensure):
+                    ensure(need_align=any(spec.timestamps and not spec.empty for spec in pending))
+                load_ms = int((time.perf_counter() - started) * 1000)
+                log(f"model loaded in {load_ms} ms")
+            except QasrError:
+                raise
+            except Exception as exc:
+                raise RuntimeFailure(f"failed to load model: {exc}") from exc
 
     if state_path is not None and not stop_early:
         started_at = now_iso()
@@ -479,26 +504,34 @@ def _run_locked(
                 },
             )
 
-    first_item = True
-    batch_size = max(1, settings.batch_size)
-    for start in range(0, len(pending), batch_size):
-        group = pending[start:start + batch_size]
-        if settings.fail_fast and any(spec.error for spec in specs):
-            break
-        group_opts = TranscribeOptions(
-            timestamps=any(spec.timestamps for spec in group),
-            granularity=group[0].granularity,
-            max_new_tokens=max_tokens,
-        )
-        _process_group(
-            group, backend, group_opts, settings, log,
-            load_ms=load_ms if first_item else 0,
+    if settings.backend_name == "remote":
+        _run_remote_items(
+            pending, backend, settings, log,
+            max_tokens=max_tokens,
             state_path=state_path,
             display_out_dir=display_out_dir,
         )
-        first_item = False
-        if settings.fail_fast and any(spec.error for spec in group):
-            break
+    else:
+        first_item = True
+        batch_size = max(1, settings.batch_size)
+        for start in range(0, len(pending), batch_size):
+            group = pending[start:start + batch_size]
+            if settings.fail_fast and any(spec.error for spec in specs):
+                break
+            group_opts = TranscribeOptions(
+                timestamps=any(spec.timestamps for spec in group),
+                granularity=group[0].granularity,
+                max_new_tokens=max_tokens,
+            )
+            _process_group(
+                group, backend, group_opts, settings, log,
+                load_ms=load_ms if first_item else 0,
+                state_path=state_path,
+                display_out_dir=display_out_dir,
+            )
+            first_item = False
+            if settings.fail_fast and any(spec.error for spec in group):
+                break
 
     # Fail-fast leaves later items unattempted: give them an explicit terminal
     # state instead of leaving a stale ``running`` record behind.
@@ -698,6 +731,68 @@ def _process_group(
                            display_out_dir=display_out_dir)
 
 
+def _run_remote_items(
+    pending: List[ItemSpec],
+    backend: Any,
+    settings: TranscribeSettings,
+    log: LogFn,
+    *,
+    max_tokens: int,
+    state_path: Optional[Path],
+    display_out_dir: Optional[str],
+) -> None:
+    """Run remote jobs concurrently while keeping state appends serialized.
+
+    Results are reported in input order by the collection phase; the first
+    error is likewise taken in input order. ``--fail-fast`` cancels queued
+    futures, and the finalization pass marks anything unattempted as skipped so
+    no ``running`` record is left behind.
+    """
+    import threading
+    from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
+
+    state_lock = threading.Lock()
+    workers = max(1, min(int(settings.jobs or 1), len(pending)))
+
+    def work(spec: ItemSpec) -> Any:
+        started = time.perf_counter()
+        try:
+            results = backend.transcribe(
+                [TranscribeJob(item=spec.item, info=spec.info,
+                               language=spec.language, context=spec.context)],
+                TranscribeOptions(timestamps=spec.timestamps,
+                                  granularity=spec.granularity,
+                                  max_new_tokens=max_tokens),
+            )
+            return spec, results[0], None, int((time.perf_counter() - started) * 1000)
+        except Exception as exc:  # noqa: BLE001 - translated per item below
+            return spec, None, exc, int((time.perf_counter() - started) * 1000)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(work, spec): spec for spec in pending}
+        for future in as_completed(futures):
+            try:
+                spec, result, exc, elapsed_ms = future.result()
+            except CancelledError:
+                continue
+            if exc is not None:
+                _fail_item(spec, exc, settings, log, state_path=state_path,
+                           display_out_dir=display_out_dir)
+                if settings.fail_fast:
+                    for other in futures:
+                        if other is not future:
+                            other.cancel()
+                continue
+            _complete_item(
+                spec, result, settings, log,
+                load_ms=0,
+                infer_ms=elapsed_ms,
+                state_path=state_path,
+                display_out_dir=display_out_dir,
+                state_lock=state_lock,
+            )
+
+
 def _complete_item(
     spec: ItemSpec,
     result: Any,
@@ -708,6 +803,7 @@ def _complete_item(
     infer_ms: int,
     state_path: Optional[Path],
     display_out_dir: Optional[str],
+    state_lock: Optional[Any] = None,
 ) -> None:
     duration = spec.info.duration_s if spec.info else 0.0
     wall_ms = load_ms + infer_ms
@@ -738,20 +834,28 @@ def _complete_item(
         outputs=outputs,
     )
     if state_path is not None:
-        append_jsonl(
-            state_path,
-            {
-                "schema_version": SCHEMA_VERSION,
-                "id": spec.id,
-                "job_key": spec.job_key,
-                "status": STATUS_DONE,
-                "outputs": outputs,
-                "error": None,
-                "started_at": spec.started_at,
-                "finished_at": now_iso(),
-            },
-        )
+        if state_lock is None:
+            _append_done(state_path, spec, outputs)
+        else:
+            with state_lock:
+                _append_done(state_path, spec, outputs)
     log(f"ok {spec.id} ({duration:.2f}s, rtf {rtf:.3f})" if rtf is not None else f"ok {spec.id}")
+
+
+def _append_done(state_path: Path, spec: ItemSpec, outputs: List[Dict[str, Any]]) -> None:
+    append_jsonl(
+        state_path,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "id": spec.id,
+            "job_key": spec.job_key,
+            "status": STATUS_DONE,
+            "outputs": outputs,
+            "error": None,
+            "started_at": spec.started_at,
+            "finished_at": now_iso(),
+        },
+    )
 
 
 def _fail_item(

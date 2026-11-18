@@ -89,7 +89,7 @@ class Segment:
 class TranscribeResult:
     text: str
     language: Optional[str]
-    language_source: str  # auto | forced
+    language_source: str  # auto | forced | server
     segments: List[Segment] = field(default_factory=list)
     timestamp_source: Optional[str] = None
     text_transform: str = TEXT_TRANSFORM

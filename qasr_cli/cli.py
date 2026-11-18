@@ -49,6 +49,8 @@ CLI_CONFIG_KEYS = (
     "model_dir",
     "offline",
     "server",
+    "timeout",
+    "retries",
 )
 
 
@@ -118,6 +120,8 @@ def _add_transcribe(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--max-new-tokens", dest="max_new_tokens", default=None,
                    help="'auto' (default) or a positive integer")
     p.add_argument("--jobs", type=int, default=None)
+    p.add_argument("--timeout", type=float, default=argparse.SUPPRESS, metavar="SECONDS")
+    p.add_argument("--retries", type=int, default=argparse.SUPPRESS)
     p.add_argument("--recursive", action="store_true", default=False)
     p.add_argument("--manifest", metavar="FILE", default=None)
     p.add_argument("--resume", action="store_true", default=False)

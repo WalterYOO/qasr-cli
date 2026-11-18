@@ -37,7 +37,7 @@
       "properties": {
         "text": {"type": ["string", "null"]},
         "language": {"type": ["string", "null"]},
-        "language_source": {"enum": ["auto", "forced"]},
+        "language_source": {"enum": ["auto", "forced", "server"]},
         "segments": {
           "type": "array",
           "items": {

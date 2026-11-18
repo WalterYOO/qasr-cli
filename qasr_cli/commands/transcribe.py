@@ -76,11 +76,7 @@ def _normalize_formats(value: Any, default: Sequence[str]) -> List[str]:
 
 def handle(ns: Any, ctx: CommandContext) -> int:
     cfg = ctx.config
-    if selected_backend(cfg) == "remote":
-        raise CapabilityError(
-            "remote transcription arrives in the next P1 milestone",
-            hint="use local transcription for now, or wait for N2",
-        )
+    is_remote = selected_backend(cfg) == "remote"
 
     if getattr(ns, "manifest", None) and getattr(ns, "inputs", None):
         raise UsageError("--manifest cannot be combined with positional inputs")
@@ -205,6 +201,16 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                 "timestamps require an explicit alignment language",
                 hint="pass --language zh|en|yue|fr|de|it|ja|ko|pt|ru|es",
             )
+        if is_remote and spec.timestamps:
+            raise CapabilityError(
+                "the remote backend does not return timestamps",
+                hint="run timestamps locally with a forced aligner",
+            )
+        if is_remote and spec.granularity != "sentence":
+            raise CapabilityError(
+                "the remote backend cannot honour --granularity",
+                hint="remote responses are plain text; run timestamps locally",
+            )
 
     # ---- stdout mode ----------------------------------------------------
     total = len(specs) + len(spec_errors)
@@ -265,6 +271,10 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         batch_size = 1
     if int(batch_size) < 1:
         raise UsageError("--batch-size must be >= 1")
+    if is_remote:
+        if int(batch_size) > 1:
+            ctx.warn("remote mode ignores --batch-size > 1; use --jobs for concurrency")
+        batch_size = 1
     max_inference = getattr(ns, "max_inference_batch_size", None)
     if max_inference is None:
         max_inference = cfg.get("max_inference_batch_size")
@@ -272,15 +282,37 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         max_inference = batch_size
     if int(max_inference) < 1:
         raise UsageError("--max-inference-batch-size must be >= 1")
+    if is_remote:
+        max_inference = 1
     jobs = getattr(ns, "jobs", None)
     if jobs is None:
         jobs = cfg.get("jobs")
-    if jobs is not None:
-        jobs = int(jobs)
-        if not 1 <= jobs <= 32:
-            raise UsageError("--jobs must be between 1 and 32")
-        if jobs > 1 and selected_backend(cfg) != "remote":
+    if jobs is None:
+        jobs = 4 if is_remote else 1
+    jobs = int(jobs)
+    if not 1 <= jobs <= 32:
+        raise UsageError("--jobs must be between 1 and 32")
+    if not is_remote:
+        if jobs > 1:
             ctx.warn("local mode forces --jobs 1 (use --batch-size for throughput)")
+        jobs = 1
+
+    timeout = getattr(ns, "timeout", None)
+    if timeout is None:
+        timeout = cfg.get("timeout")
+    if timeout is None:
+        timeout = 300.0
+    timeout = float(timeout)
+    if timeout <= 0:
+        raise UsageError("--timeout must be > 0")
+    retries = getattr(ns, "retries", None)
+    if retries is None:
+        retries = cfg.get("retries")
+    if retries is None:
+        retries = 2
+    retries = int(retries)
+    if retries < 0 or retries > 20:
+        raise UsageError("--retries must be between 0 and 20")
 
     max_new_tokens = parse_auto_int(getattr(ns, "max_new_tokens", None))
 
@@ -293,9 +325,14 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         for spec in specs
     )
     model = resolve_model(cfg.get("model"), cfg)
-    if not ctx.dry_run and needs_runtime:
+    if not ctx.dry_run and needs_runtime and not is_remote:
         require_local(model, action="transcribe")
-    model_path = model.path or Path(str(model.value))
+    if is_remote:
+        model_id = model.repo or str(model.value)
+        model_path = model.path or Path(model_id)
+    else:
+        model_path = model.path or Path(str(model.value))
+        model_id = model.repo or model.alias or str(model_path)
 
     # Zero-sample inputs have nothing to align: no aligner is needed for them.
     need_align = any(
@@ -305,20 +342,22 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     aligner = resolve_aligner(cfg.get("aligner"), cfg, required=need_align and not ctx.dry_run) if need_align else None
     aligner_path = aligner.path if aligner is not None else None
 
-    backend_name = str(cfg.get("backend") or "auto")
+    backend_name = selected_backend(cfg)
     if backend_name == "auto":
         backend_name = "transformers"
-    if backend_name != "transformers":
+    if backend_name not in ("transformers", "remote"):
         raise ModelError(
-            f"backend '{backend_name}' is not available in P0",
-            hint="P0 supports the local transformers backend; vLLM/remote arrive in P1",
+            f"backend '{backend_name}' is not available yet",
+            hint="vLLM support arrives in a later P1 milestone; use transformers or --server",
         )
 
-    device, dtype = resolve_device_dtype(cfg, optional=ctx.dry_run or not needs_runtime)
+    device, dtype = resolve_device_dtype(
+        cfg, optional=ctx.dry_run or not needs_runtime or is_remote
+    )
 
     model_fingerprint = None
     aligner_fingerprint = None
-    if not ctx.dry_run and needs_runtime:
+    if not ctx.dry_run and needs_runtime and not is_remote:
         cache = FingerprintCache()
         if model.present and model.path is not None:
             model_fingerprint = cache.dir_fingerprint(model.path)
@@ -328,7 +367,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
 
     settings = core.TranscribeSettings(
         model_path=model_path,
-        model_id=model.repo or model.alias or str(model_path),
+        model_id=model_id,
         model_fingerprint=model_fingerprint,
         aligner_path=aligner_path,
         aligner_fingerprint=aligner_fingerprint,
@@ -349,6 +388,10 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         continue_on_error=not bool(getattr(ns, "fail_fast", False)),
         fail_fast=bool(getattr(ns, "fail_fast", False)),
         offline=bool(cfg.get("offline")),
+        jobs=jobs,
+        remote_url=str(cfg.get("server") or "") if is_remote else None,
+        remote_timeout=timeout,
+        remote_retries=retries,
     )
 
     result = core.run(settings, specs, spec_errors, log=ctx.log, config=cfg)
