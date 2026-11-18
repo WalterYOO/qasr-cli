@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional, Sequence
 from . import __version__
 from .commands import align as align_cmd
 from .commands import bench as bench_cmd
+from .commands import completion as completion_cmd
 from .commands import config as config_cmd
 from .commands import doctor as doctor_cmd
 from .commands import jobs as jobs_cmd
@@ -44,6 +45,7 @@ COMMAND_HANDLERS = {
     "jobs": jobs_cmd.handle,
     "bench": bench_cmd.handle,
     "stream": stream_cmd.handle,
+    "completion": completion_cmd.handle,
 }
 
 CLI_CONFIG_KEYS = (
@@ -270,6 +272,17 @@ def _add_stream(sub: argparse._SubParsersAction) -> None:
                          default=None)
 
 
+def _add_completion(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "completion",
+        help="print a shell completion script",
+        description="Print a completion script for bash, zsh or fish to stdout.",
+    )
+    _add_common_flags(p)
+    p.add_argument("shell", nargs="?", choices=["bash", "zsh", "fish"],
+                   metavar="bash|zsh|fish")
+
+
 def _add_doctor(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("doctor", help="check the local runtime and models")
     _add_common_flags(p)
@@ -329,6 +342,7 @@ def build_parser() -> QasrParser:
     _add_jobs(sub)
     _add_bench(sub)
     _add_stream(sub)
+    _add_completion(sub)
     return parser
 
 
