@@ -80,7 +80,8 @@ def _resolve_backend_for_stream(cfg: Any) -> None:
         try:
             require_vllm()
         except QasrError as exc:
-            raise CapabilityError(exc.message, hint=exc.hint) from exc
+            details = {"original_hint": exc.hint} if exc.hint else None
+            raise CapabilityError(exc.message, hint=MIC_HINT, details=details) from exc
         return
     if requested != "auto":
         raise CapabilityError(

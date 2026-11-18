@@ -322,6 +322,7 @@ def run_stream(
                     samples = samples[: settings.max_samples - audio_sent]
                     cap_hit = True
                 if samples.size:
+                    chunk_started = clock()
                     state = backend.streaming_transcribe(samples, state)
                     audio_sent += int(samples.size)
                     chunk_id = int(getattr(state, "chunk_id", 0) or 0)
@@ -336,6 +337,8 @@ def run_stream(
                         )
                     # Wall-clock pacing: only between complete chunks with more
                     # audio waiting; never pre-sleep, catch up, or sleep on EOF.
+                    # The chunk's own processing time counts against the budget,
+                    # so slow chunks sleep less instead of falling behind.
                     if (
                         settings.realtime
                         and settings.input_kind == "file"
@@ -343,7 +346,8 @@ def run_stream(
                         and following is not None
                         and not cap_hit
                     ):
-                        sleep(settings.chunk_ms / 1000.0)
+                        processing = clock() - chunk_started
+                        sleep(max(0.0, settings.chunk_ms / 1000.0 - processing))
                 if cap_hit:
                     break
         except KeyboardInterrupt:

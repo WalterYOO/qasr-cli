@@ -331,7 +331,7 @@ def test_realtime_paces_file_and_rejects_stdin(capsys, tmp_path, stream_env, mon
     code = main(_stream_args(wav, "--chunk-ms", "1000", "--realtime", "--emit", "jsonl"))
     capsys.readouterr()
     assert code == 0
-    assert sleeps == [1.0]
+    assert sleeps == [pytest.approx(1.0, abs=0.01)]
 
     code = main([
         "--backend", "vllm", "--device", "cpu", "--dtype", "fp32",
@@ -341,6 +341,47 @@ def test_realtime_paces_file_and_rejects_stdin(capsys, tmp_path, stream_env, mon
     captured = capsys.readouterr()
     assert code == 2
     assert "--realtime" in captured.err
+
+
+class _FakeClock:
+    def __init__(self):
+        self.value = 0.0
+
+    def __call__(self):
+        return self.value
+
+
+@pytest.mark.parametrize("advance,expected", [(0.4, 0.6), (1.5, 0.0)])
+def test_realtime_sleep_subtracts_chunk_processing_time(advance, expected):
+    clock = _FakeClock()
+    sleeps = []
+    backend = FakeStreamBackend()
+    original = backend.streaming_transcribe
+
+    def transcribe(pcm, state):
+        result = original(pcm, state)
+        clock.value += advance
+        return result
+
+    backend.streaming_transcribe = transcribe
+    settings = core_stream.StreamSettings(
+        chunk_samples=16000,
+        chunk_ms=1000,
+        input_kind="file",
+        realtime=True,
+        emit="jsonl",
+    )
+    chunks = [np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.float32)]
+    code = core_stream.run_stream(
+        backend,
+        chunks,
+        settings,
+        clock=clock,
+        sleep=sleeps.append,
+        stdout=io.StringIO(),
+    )
+    assert code == 0
+    assert sleeps == [pytest.approx(expected)]
 
 
 @pytest.mark.parametrize(
@@ -386,6 +427,7 @@ def test_explicit_vllm_unavailable_is_exit_4(capsys, tmp_path, stream_env, monke
     captured = capsys.readouterr()
     assert code == 4
     assert "vllm" in captured.err.lower()
+    assert 'uv tool install "qasr-cli[vllm,mic]"' in captured.err
 
 
 def test_backend_capability_errors(capsys, tmp_path, stream_env):
