@@ -39,6 +39,10 @@ def resolve_device_dtype(config: Config, *, optional: bool = False) -> tuple[str
     """
     requested_device = str(config.get("device") or "auto")
     requested_dtype = str(config.get("dtype") or "auto")
+    if optional and requested_device == "auto" and requested_dtype == "auto":
+        # Dry runs only report the plan: do not probe/import torch just to
+        # guess the device. Explicit values are still validated below.
+        return "auto", "fp32"
     if requested_device != "auto" and requested_dtype != "auto":
         return requested_device, requested_dtype
     try:

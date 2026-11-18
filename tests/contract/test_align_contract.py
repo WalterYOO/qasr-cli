@@ -8,6 +8,7 @@ from qasr_cli import align as align_core
 from qasr_cli.align import compute_coverage, normalize_for_coverage
 from qasr_cli.backends import AlignResult, Segment
 from qasr_cli.cli import main
+from tests.conftest import write_wav
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schemas"
 TEXT = "甚至出现交易几乎停滞的情况。"
@@ -246,3 +247,35 @@ def test_align_dry_run_reports_window_plan(monkeypatch, capsys, tmp_path, model_
     assert plan["window_seconds"] == 180.0
     assert len(plan["windows"]) == 2
     assert plan["windows"][-1]["core_end_s"] == 181.0
+    for window in plan["windows"]:
+        for field in (
+            "index", "audio_start_s", "audio_end_s",
+            "core_start_s", "core_end_s",
+        ):
+            assert field in window
+
+
+def test_align_dry_run_does_not_import_torch(capsys, tmp_path, monkeypatch):
+    import sys
+
+    blocker = pytest.importorskip("importlib.abc")
+    wav = write_wav(tmp_path / "a.wav")
+
+    class _Block(blocker.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname.split(".")[0] in ("torch", "vllm", "qwen_asr"):
+                raise AssertionError(f"align --dry-run imported {fullname}")
+            return None
+
+    for name in list(sys.modules):
+        if name.split(".")[0] in ("torch", "vllm", "qwen_asr"):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_Block(), *sys.meta_path])
+    code = main([
+        "align", str(wav), "--text", "你好世界", "--language", "zh",
+        "--dry-run", "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload
+    assert payload["plan"]["device"] == "auto"
+    assert payload["plan"]["dtype"] == "fp32"
