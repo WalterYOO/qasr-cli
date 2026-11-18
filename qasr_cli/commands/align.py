@@ -12,7 +12,7 @@ from ..inputs import InputItem, sanitize_id
 from ..languages import ALIGNABLE, detect_script_language, resolve_alignable
 from ..render import FORMATS
 from ..subtitles import cues_text, parse_srt
-from .common import CommandContext, resolve_device_dtype
+from .common import CommandContext, resolve_device_dtype, selected_backend
 
 
 def _read_text(ns: Any) -> str:
@@ -53,6 +53,11 @@ def _formats(ns: Any) -> List[str]:
 
 def handle(ns: Any, ctx: CommandContext) -> int:
     cfg = ctx.config
+    if selected_backend(cfg) == "remote":
+        raise CapabilityError(
+            "remote backends do not provide an alignment endpoint",
+            hint="run align locally with a forced aligner",
+        )
     audio = getattr(ns, "audio", None)
     if not audio:
         raise UsageError("align requires an AUDIO argument")

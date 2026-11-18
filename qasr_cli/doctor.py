@@ -205,7 +205,48 @@ def _check_home_writable() -> Dict[str, Any]:
     return _check("qasr-home", "ok", str(home), "writable")
 
 
-def run_doctor(config: Optional[Config] = None) -> Dict[str, Any]:
+def _check_server(server: str) -> Dict[str, Any]:
+    """Probe a remote OpenAI-compatible server (token stays out of the payload)."""
+    from .remote import probe_server
+
+    try:
+        info = probe_server(server)
+    except Exception as exc:  # invalid URL -> UsageError, never crash doctor
+        from .remote import redact_url
+
+        message = getattr(exc, "message", str(exc))
+        return _check("server", "fail", {"url": redact_url(str(server))}, message,
+                      getattr(exc, "hint", None))
+
+    value = {
+        "url": info["url"],
+        "latency_ms": info["latency_ms"],
+        "models": info["models"],
+        "token_set": info["token_set"],
+    }
+    if not info["reachable"]:
+        hint = ("check the host/port, the SSH tunnel, and the server process")
+        return _check("server", "fail", value, str(info.get("error") or "unreachable"), hint)
+    status = info.get("http_status") or 0
+    if info["auth_rejected"]:
+        return _check("server", "warn", value, f"HTTP {status} (auth rejected)",
+                      "set QASR_SERVE_TOKEN in the environment")
+    if status >= 500:
+        return _check("server", "fail", value, f"HTTP {status}", "server returned an error; check its logs")
+    if status >= 400:
+        return _check("server", "warn", value, f"HTTP {status}",
+                      "the server may not expose /v1/models")
+    if info.get("error"):
+        return _check("server", "warn", value, f"{status}: {info['error']}")
+    count = len(info["models"])
+    latency = info["latency_ms"]
+    detail = f"{count} model(s), {latency} ms"
+    if info["token_set"]:
+        detail += ", token set"
+    return _check("server", "ok", value, detail)
+
+
+def run_doctor(config: Optional[Config] = None, *, server: Optional[str] = None) -> Dict[str, Any]:
     checks: List[Dict[str, Any]] = [
         _check_python(),
         _check("qasr", "ok", __version__, "qasr-cli"),
@@ -222,6 +263,9 @@ def run_doctor(config: Optional[Config] = None) -> Dict[str, Any]:
         _check_ffmpeg(),
     ]
     checks.extend(_check_models(config))
+    remote_url = server or (config.get("server") if config is not None else None)
+    if remote_url:
+        checks.append(_check_server(str(remote_url)))
 
     statuses = {c["status"] for c in checks}
     if "fail" in statuses:

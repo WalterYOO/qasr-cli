@@ -73,3 +73,10 @@ def parse_auto_int(value: Optional[str], *, name: str = "--max-new-tokens") -> O
 
         raise UsageError(f"{name} must be a positive integer")
     return number
+
+
+def selected_backend(config: Config) -> str:
+    """Effective backend name; ``--server`` always selects remote."""
+    if config.get("server"):
+        return "remote"
+    return str(config.get("backend") or "auto").strip().lower()

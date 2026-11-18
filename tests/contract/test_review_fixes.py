@@ -40,14 +40,25 @@ def test_models_without_action_is_usage_error(capsys):
     capsys.readouterr()
 
 
-def test_p1_config_keys_are_rejected(capsys, tmp_path):
+def test_p1_config_keys_are_accepted_by_the_config_layer(capsys, tmp_path):
+    # P1 makes 'server' and remote 'jobs' meaningful; they must load cleanly.
     jobs = _write_config(tmp_path, {"jobs": 2})
-    assert main(["languages", "--config", str(jobs)]) == 2
+    assert main(["languages", "--config", str(jobs)]) == 0
     capsys.readouterr()
 
     server = _write_config(tmp_path, {"server": "http://localhost:8080"})
-    assert main(["languages", "--config", str(server)]) == 2
+    assert main(["languages", "--config", str(server)]) == 0
     capsys.readouterr()
+
+
+def test_local_jobs_from_config_warns_and_is_forced_to_one(capsys, tmp_path):
+    empty = write_wav(tmp_path / "empty.wav", seconds=0)
+    config = _write_config(tmp_path, {"jobs": 2})
+    out = tmp_path / "out"
+    code = main(["transcribe", str(empty), "-o", str(out), "--config", str(config)])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "forces --jobs 1" in captured.err
 
 
 def test_config_format_controls_output_extension(capsys, tmp_path):

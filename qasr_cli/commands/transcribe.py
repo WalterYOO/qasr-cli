@@ -17,7 +17,7 @@ from ..errors import (
 from ..inputs import InputItem, expand_inputs, resolve_manifest_audio
 from ..jobs import ensure_output_unlocked, load_manifest
 from ..languages import resolve_alignable, resolve_forceable
-from .common import CommandContext, parse_auto_int, resolve_device_dtype
+from .common import CommandContext, parse_auto_int, resolve_device_dtype, selected_backend
 
 GRANULARITIES = ("sentence", "word", "char")
 
@@ -76,6 +76,11 @@ def _normalize_formats(value: Any, default: Sequence[str]) -> List[str]:
 
 def handle(ns: Any, ctx: CommandContext) -> int:
     cfg = ctx.config
+    if selected_backend(cfg) == "remote":
+        raise CapabilityError(
+            "remote transcription arrives in the next P1 milestone",
+            hint="use local transcription for now, or wait for N2",
+        )
 
     if getattr(ns, "manifest", None) and getattr(ns, "inputs", None):
         raise UsageError("--manifest cannot be combined with positional inputs")
@@ -267,8 +272,15 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         max_inference = batch_size
     if int(max_inference) < 1:
         raise UsageError("--max-inference-batch-size must be >= 1")
-    if getattr(ns, "jobs", None) and int(ns.jobs) > 1:
-        ctx.warn("local mode forces --jobs 1 (use --batch-size for throughput)")
+    jobs = getattr(ns, "jobs", None)
+    if jobs is None:
+        jobs = cfg.get("jobs")
+    if jobs is not None:
+        jobs = int(jobs)
+        if not 1 <= jobs <= 32:
+            raise UsageError("--jobs must be between 1 and 32")
+        if jobs > 1 and selected_backend(cfg) != "remote":
+            ctx.warn("local mode forces --jobs 1 (use --batch-size for throughput)")
 
     max_new_tokens = parse_auto_int(getattr(ns, "max_new_tokens", None))
 

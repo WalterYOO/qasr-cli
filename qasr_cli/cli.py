@@ -15,6 +15,7 @@ from .commands import config as config_cmd
 from .commands import doctor as doctor_cmd
 from .commands import languages as languages_cmd
 from .commands import models as models_cmd
+from .commands import serve as serve_cmd
 from .commands import transcribe as transcribe_cmd
 from .commands.common import CommandContext
 from .config import load_config
@@ -35,6 +36,7 @@ COMMAND_HANDLERS = {
     "languages": languages_cmd.handle,
     "doctor": doctor_cmd.handle,
     "config": config_cmd.handle,
+    "serve": serve_cmd.handle,
 }
 
 CLI_CONFIG_KEYS = (
@@ -46,6 +48,7 @@ CLI_CONFIG_KEYS = (
     "attn_implementation",
     "model_dir",
     "offline",
+    "server",
 )
 
 
@@ -68,8 +71,9 @@ def _add_common_flags(parser: argparse.ArgumentParser) -> None:
                         help="alias 1.7b|0.6b, a local path, or a HF repo id")
     parser.add_argument("--aligner", metavar="auto|none|PATH", default=argparse.SUPPRESS,
                         help="forced aligner model (default: auto)")
-    parser.add_argument("--backend", metavar="auto|transformers", default=argparse.SUPPRESS,
-                        help="execution backend (P0: auto|transformers)")
+    parser.add_argument("--backend", metavar="auto|transformers|vllm|remote",
+                        default=argparse.SUPPRESS,
+                        help="execution backend (remote is implied by --server)")
     parser.add_argument("--device", metavar="auto|cpu|mps|cuda|cuda:N",
                         default=argparse.SUPPRESS)
     parser.add_argument("--dtype", metavar="auto|bf16|fp16|fp32", default=argparse.SUPPRESS)
@@ -79,6 +83,8 @@ def _add_common_flags(parser: argparse.ArgumentParser) -> None:
                         default=argparse.SUPPRESS, help="root directory holding model folders")
     parser.add_argument("--offline", action="store_true", default=argparse.SUPPRESS,
                         help="never touch the network")
+    parser.add_argument("--server", metavar="URL", default=argparse.SUPPRESS,
+                        help="remote OpenAI-compatible server (implies --backend remote)")
     parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                         help="write one JSON object to stdout")
     parser.add_argument("--jsonl", action="store_true", default=argparse.SUPPRESS,
@@ -171,6 +177,16 @@ def _add_languages(sub: argparse._SubParsersAction) -> None:
     _add_common_flags(p)
 
 
+def _add_serve(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("serve", help="start qwen-asr-serve for remote clients")
+    _add_common_flags(p)
+    p.add_argument("model_target", nargs="?", metavar="MODEL", default=None)
+    p.add_argument("--host", default=None)
+    p.add_argument("--port", type=int, default=None)
+    p.add_argument("--gpu-memory-utilization", dest="gpu_memory_utilization",
+                   type=float, default=None)
+
+
 def _add_doctor(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("doctor", help="check the local runtime and models")
     _add_common_flags(p)
@@ -199,6 +215,7 @@ def build_parser() -> QasrParser:
     sub = parser.add_subparsers(dest="command", metavar="<command>")
     _add_transcribe(sub)
     _add_align(sub)
+    _add_serve(sub)
     _add_models(sub)
     _add_languages(sub)
     _add_doctor(sub)
@@ -214,18 +231,103 @@ def _collect_overrides(ns: argparse.Namespace) -> Dict[str, Any]:
     return overrides
 
 
-def _reject_p1_config(config: Any) -> None:
-    """Fail loudly on configuration keys that only P1 implements."""
-    if config.get("server"):
+# Flags that take a value, used to find the ``serve`` token without mistaking
+# a flag value for the command.
+_GLOBAL_VALUE_FLAGS = frozenset(
+    {
+        "--config",
+        "--model",
+        "--aligner",
+        "--backend",
+        "--device",
+        "--dtype",
+        "--attn-implementation",
+        "--model-dir",
+        "--log-level",
+        "--server",
+    }
+)
+_SERVE_VALUE_FLAGS = _GLOBAL_VALUE_FLAGS | {
+    "--host",
+    "--port",
+    "--gpu-memory-utilization",
+}
+_SERVE_BOOL_FLAGS = frozenset(
+    {"--json", "--jsonl", "--dry-run", "--quiet", "--verbose", "--offline", "-h", "--help"}
+)
+
+
+def _find_serve_index(argv: Sequence[str]) -> Optional[int]:
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "serve":
+            return index
+        name = token.split("=", 1)[0]
+        index += 2 if name in _GLOBAL_VALUE_FLAGS and "=" not in token else 1
+    return None
+
+
+def _split_serve_tail(tail: Sequence[str]) -> tuple[Optional[str], list[str], list[str]]:
+    """Split ``serve`` arguments into model, qasr-known flags, and passthrough.
+
+    Everything unknown is forwarded verbatim to ``qwen-asr-serve``. Once an
+    unknown option appears, every following bare token belongs to it rather
+    than being mistaken for MODEL.
+    """
+    model: Optional[str] = None
+    known: list[str] = []
+    passthrough: list[str] = []
+    seen_unknown = False
+    index = 0
+    while index < len(tail):
+        token = tail[index]
+        if token == "--":
+            passthrough.extend(tail[index + 1:])
+            break
+        name = token.split("=", 1)[0]
+        if name in _SERVE_VALUE_FLAGS:
+            known.append(token)
+            if "=" not in token:
+                if index + 1 < len(tail):
+                    known.append(tail[index + 1])
+                    index += 2
+                    continue
+                known.append("")
+            index += 1
+            continue
+        if token in _SERVE_BOOL_FLAGS:
+            known.append(token)
+            index += 1
+            continue
+        if token.startswith("-"):
+            seen_unknown = True
+            passthrough.append(token)
+            index += 1
+            continue
+        if model is None and not seen_unknown:
+            model = token
+        else:
+            passthrough.append(token)
+        index += 1
+    return model, known, passthrough
+
+
+def _validate_backend(config: Any, command: str) -> None:
+    """Reconcile ``--server`` with ``--backend``; reject an unbound remote."""
+    if command == "serve":
+        return
+    backend = str(config.get("backend") or "auto").strip().lower()
+    server = config.get("server")
+    if backend == "remote" and not server:
         raise UsageError(
-            "remote server mode is not available in P0",
-            hint="remove 'server' from the config file (P1 adds --server)",
+            "--backend remote requires --server URL",
+            hint="pass --server URL or set QASR_SERVE_URL",
         )
-    jobs = config.get("jobs")
-    if jobs is not None and int(jobs) != 1:
+    if server and backend in ("transformers", "vllm"):
         raise UsageError(
-            f"jobs={jobs} from configuration is not available in P0",
-            hint="remove 'jobs' from the config file; use --batch-size",
+            f"--server conflicts with --backend {backend}",
+            hint="drop --backend; --server implies the remote backend",
         )
 
 
@@ -269,8 +371,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
 
+    serve_passthrough: list[str] = []
+    parse_argv: Sequence[str] = argv
+    serve_index = _find_serve_index(argv)
+    if serve_index is not None:
+        model_token, known_tail, serve_passthrough = _split_serve_tail(argv[serve_index + 1:])
+        parse_argv = (
+            list(argv[: serve_index + 1])
+            + ([model_token] if model_token else [])
+            + known_tail
+        )
+
     try:
-        ns = parser.parse_args(argv)
+        ns = parser.parse_args(parse_argv)
     except SystemExit as exc:  # --help
         return int(exc.code or 0)
     except QasrError as exc:
@@ -311,7 +424,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             getattr(ns, "config", None),
             cli_overrides=_collect_overrides(ns),
         )
-        _reject_p1_config(config)
+        _validate_backend(config, command)
         ctx = CommandContext(
             config=config,
             json_mode=json_mode,
@@ -324,6 +437,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         handler = COMMAND_HANDLERS.get(command)
         if handler is None:
             raise UsageError(f"unknown command: {command}")
+        if command == "serve":
+            ns.passthrough = serve_passthrough
 
         _install_signal_handlers()
         code = int(handler(ns, ctx))

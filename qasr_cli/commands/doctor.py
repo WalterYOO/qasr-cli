@@ -11,7 +11,7 @@ from .common import CommandContext
 
 
 def handle(ns: Any, ctx: CommandContext) -> int:
-    payload = run_doctor(ctx.config)
+    payload = run_doctor(ctx.config, server=ctx.config.get("server"))
     if ctx.json_mode:
         ctx.emit(json.dumps(payload, ensure_ascii=False))
     else:

@@ -71,7 +71,7 @@ FALSE_VALUES = {"0", "false", "no", "off"}
 
 DEVICE_PATTERN = re.compile(r"auto|cpu|mps|cuda|cuda:\d+")
 DTYPE_VALUES = ("auto", "bf16", "fp16", "fp32")
-BACKEND_VALUES = ("auto", "transformers", "vllm")
+BACKEND_VALUES = ("auto", "transformers", "vllm", "remote")
 ATTN_IMPLEMENTATION_VALUES = ("auto", "sdpa", "flash_attention_2", "eager")
 
 
