@@ -189,6 +189,11 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         unfixed_tokens=unfixed_tokens,
     )
 
+    # Capability checks come before model resolution (Q14): a missing mic
+    # dependency must not pay for a vLLM engine load.
+    if input_value == "mic":
+        core_stream.require_mic()
+
     if selected_backend(cfg) in ("auto", "vllm"):
         set_cuda_visible_device(str(cfg.get("device") or "auto"))
     _resolve_backend_for_stream(cfg)

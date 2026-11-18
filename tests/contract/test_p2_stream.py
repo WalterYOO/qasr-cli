@@ -13,7 +13,7 @@ import pytest
 from qasr_cli import stream as core_stream
 from qasr_cli.cli import main
 from qasr_cli.commands import stream as stream_cmd
-from qasr_cli.errors import CapabilityError, RuntimeFailure
+from qasr_cli.errors import RuntimeFailure
 from tests.conftest import write_wav
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schemas"
@@ -278,24 +278,42 @@ def test_pcm_stereo_downmix_and_short_frames():
     assert chunks[0].tolist() == pytest.approx([2000 / 32768, 0.0])
 
 
-def test_mic_without_sounddevice_is_capability_error(
+def test_mic_without_sounddevice_fails_before_model_loading(
     capsys, tmp_path, stream_env, monkeypatch
 ):
-    monkeypatch.setattr(
-        core_stream,
-        "_import_sounddevice",
-        lambda: (_ for _ in ()).throw(
-            CapabilityError("microphone input requires sounddevice")
-        ),
-    )
+    import importlib
+
+    real_import = importlib.import_module
+
+    def fake_import(name, *args, **kwargs):
+        if name == "sounddevice":
+            raise ImportError("No module named 'sounddevice'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+    calls = {"resolve": 0, "build": 0}
+
+    def resolve_model(*args, **kwargs):
+        calls["resolve"] += 1
+        raise AssertionError("resolve_model must not run before the mic precheck")
+
+    def build_backend(*args, **kwargs):
+        calls["build"] += 1
+        raise AssertionError("backend must not be built before the mic precheck")
+
+    monkeypatch.setattr(stream_cmd, "resolve_model", resolve_model)
+    monkeypatch.setattr(stream_cmd, "build_vllm_backend", build_backend)
     code = main([
         "--backend", "vllm", "--device", "cpu", "--dtype", "fp32",
+        "--model", "missing/model",
         "stream", "--input", "mic", "--emit", "jsonl",
         "--max-stream-seconds", "0.2",
     ])
     captured = capsys.readouterr()
     assert code == 4
     assert "sounddevice" in captured.err
+    assert 'uv tool install "qasr-cli[mic]"' in captured.err
+    assert calls == {"resolve": 0, "build": 0}
 
 
 def test_mic_fake_sounddevice_respects_cap(capsys, stream_env, monkeypatch):

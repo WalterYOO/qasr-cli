@@ -136,6 +136,11 @@ def _import_sounddevice() -> Any:
         ) from exc
 
 
+def require_mic() -> None:
+    """Fail fast when microphone support is missing, before loading a model."""
+    _import_sounddevice()
+
+
 def iter_mic_chunks(
     *,
     block_ms: int = MIC_BLOCK_MS,
@@ -402,5 +407,6 @@ __all__ = [
     "iter_file_chunks",
     "iter_mic_chunks",
     "iter_pcm_s16le",
+    "require_mic",
     "run_stream",
 ]
