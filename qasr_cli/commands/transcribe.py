@@ -218,6 +218,11 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                          hint="there are no target paths to check otherwise")
     if getattr(ns, "retry_failed", False) and getattr(ns, "fail_fast", False):
         raise UsageError("--retry cannot be combined with --fail-fast")
+    if out_dir is not None and not ctx.dry_run:
+        # Fail fast on an active run before model resolution; registration
+        # stays late (see below) so usage errors leave no jobs entry.
+        ensure_output_unlocked(out_dir)
+
     if getattr(ns, "format", None):
         formats = _normalize_formats(ns.format, ["txt"])
         for spec in specs:
@@ -522,7 +527,6 @@ def handle(ns: Any, ctx: CommandContext) -> int:
     # stale entries in the jobs index.
     job_id = None
     if out_dir is not None and not ctx.dry_run:
-        ensure_output_unlocked(out_dir)
         from ..jobs import register_job
 
         job_id = register_job(
