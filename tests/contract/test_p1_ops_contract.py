@@ -210,13 +210,49 @@ def test_models_rm_requires_confirmation_and_deletes(capsys, model_factory):
 def test_config_get_set_roundtrip(capsys):
     code = main(["config", "set", "backend", "transformers", "--home", "--json"])
     assert code == 0, capsys.readouterr()
-    assert json.loads(capsys.readouterr().out)["value"] == "transformers"
+    written = json.loads(capsys.readouterr().out)
+    validate("config-set", written)
+    assert written["value"] == "transformers"
 
     code = main(["config", "get", "backend", "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
+    validate("config-get", payload)
     assert payload["value"] == "transformers"
     assert payload["source"].startswith("file:")
+
+
+def test_config_set_preserves_unknown_keys(capsys):
+    home = qasr_home()
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / "config.json"
+    path.write_text(
+        json.dumps({"backend": "transformers", "future_key": {"nested": 1}}),
+        encoding="utf-8",
+    )
+    code = main(["config", "set", "device", "cpu", "--json"])
+    assert code == 0, capsys.readouterr()
+    capsys.readouterr()
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["device"] == "cpu"
+    assert stored["future_key"] == {"nested": 1}
+    code = main(["config", "get", "backend", "--json"])
+    assert code == 0, capsys.readouterr()
+
+
+def test_config_set_rejects_symlinked_project_directory(capsys, tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (project / ".qasr").symlink_to(elsewhere, target_is_directory=True)
+    monkeypatch.chdir(project)
+
+    code = main(["config", "set", "device", "cpu", "--project", "--json"])
+    assert code == 2
+    capsys.readouterr()
+    assert not (elsewhere / "config.json").exists()
 
 
 def test_config_set_project_scope(capsys, tmp_path):

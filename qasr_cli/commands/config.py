@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from .. import SCHEMA_VERSION
@@ -22,13 +23,30 @@ TOKEN_KEY_MARKERS = ("token", "secret", "password", "passwd", "api_key", "apikey
 
 
 def _project_root() -> Any:
-    from pathlib import Path as _Path
-
-    current = _Path.cwd().resolve()
+    current = Path.cwd().resolve()
     for parent in (current, *current.parents):
         if (parent / ".git").exists() or (parent / "pyproject.toml").is_file():
             return parent
     return current
+
+
+def _ensure_safe_target(target: Path, root: Path) -> None:
+    """Reject a target or any existing ancestor that escapes via a symlink."""
+    root = root.resolve()
+    current = target
+    while True:
+        if current.is_symlink():
+            raise UsageError(f"refusing to write through a symlink: {current}")
+        if current.exists():
+            try:
+                current.resolve().relative_to(root)
+            except ValueError as exc:
+                raise UsageError(
+                    f"refusing to write outside {root}: {current}"
+                ) from exc
+        if current == root or current.parent == current:
+            return
+        current = current.parent
 
 
 def _get(ns: Any, ctx: CommandContext) -> int:
@@ -74,11 +92,12 @@ def _set(ns: Any, ctx: CommandContext) -> int:
     if getattr(ns, "project", False) and getattr(ns, "home", False):
         raise UsageError("--project and --home are mutually exclusive")
     if getattr(ns, "project", False):
-        target = _project_root() / ".qasr" / "config.json"
+        root = _project_root()
+        target = root / ".qasr" / "config.json"
     else:
+        root = qasr_home()
         target = home_config_path()
-    if target.is_symlink():
-        raise UsageError(f"refusing to write through a symlink: {target}")
+    _ensure_safe_target(target, root)
 
     existing: dict = {}
     if target.is_file():

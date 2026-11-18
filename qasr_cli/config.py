@@ -306,8 +306,11 @@ def _load_layer(path: Path, source: str, base_dir: Path) -> tuple[Dict[str, Any]
     values: Dict[str, Any] = {}
     for key, value in data.items():
         if key not in CONFIG_KEYS:
-            raise ConfigError(f"{path}: unknown configuration key '{key}'",
-                              hint="allowed keys: " + ", ".join(CONFIG_KEYS))
+            # Forward compatibility: files written by newer versions (or
+            # hand-edited) may carry keys this build does not know. Preserve
+            # them on disk (``config set`` rewrites the raw object) but do not
+            # let them break every command.
+            continue
         value = coerce_value(key, value, str(path))
         if key in ("model_dir",) and isinstance(value, str) and value:
             value = str((base_dir / value).resolve()) if not os.path.isabs(value) else str(Path(value).expanduser())

@@ -62,10 +62,11 @@ def test_qasr_config_env_selects_file(isolated_home, tmp_path, monkeypatch):
     assert active_config_path(cwd=isolated_home) == selected
 
 
-def test_unknown_key_is_rejected(isolated_home):
-    _write(isolated_home / "config.json", {"nope": 1})
-    with pytest.raises(ConfigError, match="unknown configuration key"):
-        load_config(cwd=isolated_home)
+def test_unknown_key_is_ignored_for_forward_compatibility(isolated_home):
+    _write(isolated_home / "config.json", {"nope": 1, "model": "0.6b"})
+    cfg = load_config(cwd=isolated_home)
+    assert cfg.get("model") == "0.6b"
+    assert "nope" not in cfg.as_dict()
 
 
 def test_bad_type_is_rejected(isolated_home):

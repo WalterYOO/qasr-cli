@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qasr-cli/config-get.json",
+  "title": "qasr config get",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "key", "value", "source"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"const": true},
+    "command": {"const": "config"},
+    "action": {"const": "get"},
+    "key": {"type": "string"},
+    "value": {},
+    "source": {"type": ["string", "null"]}
+  },
+  "additionalProperties": true
+}
