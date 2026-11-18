@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from . import SCHEMA_VERSION, __version__
-from .errors import UsageError
+from .errors import InputError, UsageError
 
 STATE_DIRNAME = ".qasr"
 STATE_FILENAME = "state.jsonl"
@@ -131,16 +131,22 @@ class OutputLock:
         self.path = self.state_dir / LOCK_FILENAME
         self.acquired = False
 
+    def check(self) -> None:
+        """Raise if a live process holds the lock (stale locks are ignored)."""
+        if not self.path.exists():
+            return
+        holder = self._read_holder()
+        if holder is None:
+            return
+        if _pid_alive(holder.get("pid")) and holder.get("host") == socket.gethostname():
+            raise UsageError(
+                f"output directory is locked by pid {holder.get('pid')}",
+                hint=f"remove {self.path} if that process is gone",
+            )
+
     def acquire(self) -> OutputLock:
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        if self.path.exists():
-            holder = self._read_holder()
-            if holder is not None and _pid_alive(holder.get("pid")) and holder.get("host") == socket.gethostname():
-                raise UsageError(
-                    f"output directory is locked by pid {holder.get('pid')}",
-                    hint=f"remove {self.path} if that process is gone",
-                )
-            # Stale lock: replace it.
+        self.check()
         self.path.write_text(
             json.dumps({"pid": os.getpid(), "host": socket.gethostname(), "created_at": now_iso()}),
             encoding="utf-8",
@@ -150,8 +156,19 @@ class OutputLock:
 
     def _read_holder(self) -> Optional[Dict[str, Any]]:
         try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            raw = self.path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            return data
+        # Tolerate a bare PID written by other tooling (JSON parses it as int).
+        try:
+            return {"pid": int(raw.strip()), "host": socket.gethostname()}
+        except ValueError:
             return None
 
     def release(self) -> None:
@@ -169,6 +186,11 @@ class OutputLock:
 
     def __exit__(self, *_exc: Any) -> None:
         self.release()
+
+
+def ensure_output_unlocked(out_dir: str | os.PathLike) -> None:
+    """Fail fast (before model work) when another live run owns ``out_dir``."""
+    OutputLock(out_dir).check()
 
 
 def _pid_alive(pid: Any) -> bool:
@@ -266,7 +288,7 @@ def load_manifest(path: str | os.PathLike) -> List[Dict[str, Any]]:
     """Parse and strictly validate a JSONL manifest."""
     target = Path(path)
     if not target.is_file():
-        raise UsageError(f"manifest not found: {target}")
+        raise InputError(f"manifest not found: {target}")
     records: List[Dict[str, Any]] = []
     seen_ids: set[str] = set()
     for lineno, line in enumerate(target.read_text(encoding="utf-8").splitlines(), start=1):
