@@ -143,4 +143,8 @@ CUDA0，`--gpu-memory-utilization 0.3`）执行并提供：
 
 P2 三项功能与打包/文档均已实现，默认测试与既有 review 套件通过。gpu06
 vLLM 黑盒验收已由协调者完成 file/stdin/cap/SIGINT/能力边界/中文场景；
-mic 预检顺序问题已由 `ac526bb` 修复，等待 gpu06 复验。
+mic 预检顺序问题已由 `ac526bb` 修复并在 gpu06 复验（rc4、0.17s、无引擎日志）。
+
+独立审查（Codex，干净 `git archive 21f111a`）：**PASS，0 BLOCKER /
+0 MAJOR / 0 MINOR**；`review_tests_p2` 187 passed、P0/P1 回归与仓库测试全绿、
+ruff 通过。审查结论见 `P2-REVIEW-REPORT.md`。
