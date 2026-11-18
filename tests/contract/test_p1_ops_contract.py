@@ -286,3 +286,38 @@ def test_models_rm_rejects_root_and_nested(capsys, model_factory):
     code = main(["models", "rm", str(nested), "--yes", "--json"])
     assert code == 2
     capsys.readouterr()
+
+
+def test_bench_passes_gpu_memory_utilization_to_vllm(
+    capsys, model_factory, monkeypatch
+):
+    model_factory("Qwen3-ASR-1.7B")
+    seen = {}
+
+    def _build(path, **kwargs):
+        seen.update(kwargs)
+        return FakeBackend()
+
+    import qasr_cli.backends as backends
+
+    monkeypatch.setattr(backends, "build_vllm_backend", _build)
+    code = main([
+        "--backend", "vllm", "--device", "cuda", "--dtype", "fp32",
+        "--gpu-memory-utilization", "0.3",
+        "bench", "--json", "--duration", "0.1", "--iterations", "1",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload
+    assert seen["gpu_memory_utilization"] == 0.3
+    assert payload["gpu_memory_utilization"] == 0.3
+
+
+def test_bench_rejects_gpu_util_for_transformers(capsys, model_factory):
+    model_factory("Qwen3-ASR-1.7B")
+    code = main([
+        "--backend", "transformers", "--device", "cpu", "--dtype", "fp32",
+        "--gpu-memory-utilization", "0.3", "bench", "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert "gpu-memory-utilization" in payload["error"]["message"]

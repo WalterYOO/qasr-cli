@@ -138,3 +138,34 @@ def test_tsv_output_file_via_out_dir(
     assert (out / "a.tsv").read_text(encoding="utf-8").startswith(
         "id\tstart\tend\ttext\tlanguage\n"
     )
+
+
+def test_tsv_language_comes_from_result_payload(
+    capsys, tmp_path, model_factory, fake_backend
+):
+    model_factory("Qwen3-ASR-1.7B")
+    wav = write_wav(tmp_path / "a.wav")
+    out = tmp_path / "out"
+    code = main([
+        "transcribe", str(wav), "--device", "cpu", "--dtype", "fp32",
+        "--language", "zh", "-o", str(out), "--format", "tsv", "--json",
+    ])
+    assert code == 0, capsys.readouterr()
+    rows = (out / "a.tsv").read_text(encoding="utf-8").splitlines()
+    assert rows[0] == "id\tstart\tend\ttext\tlanguage"
+    assert rows[1].split("\t")[4] == "Chinese"
+
+
+def test_markdown_language_not_required_but_tsv_dict_result():
+    from qasr_cli.render import render_format
+
+    item = {
+        "input": {"id": "a"},
+        "result": {
+            "text": "hello",
+            "language": "English",
+            "segments": [{"text": "hello", "start": 0.0, "end": 1.0, "kind": "word"}],
+        },
+    }
+    text = render_format("tsv", item=item, result=None)
+    assert text.splitlines()[1].endswith("\tEnglish")

@@ -61,6 +61,17 @@ def handle(ns: Any, ctx: CommandContext) -> int:
 
     is_remote = selected_backend(cfg) == "remote"
     backend_choice, backend_fallback = resolve_backend(cfg)
+
+    gpu_util = getattr(ns, "gpu_memory_utilization", None)
+    if gpu_util is not None:
+        gpu_util = float(gpu_util)
+        if backend_choice != "vllm" or is_remote:
+            raise UsageError(
+                "--gpu-memory-utilization requires --backend vllm",
+                hint="it is ignored by transformers and remote backends",
+            )
+        if not 0.0 < gpu_util <= 1.0:
+            raise UsageError("--gpu-memory-utilization must be in (0, 1]")
     model = resolve_model(cfg.get("model"), cfg)
     model_id = model.repo or model.alias or str(model.value)
     if is_remote and cfg.source_of("model") == "default":
@@ -86,6 +97,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                 "device": device,
                 "dtype": dtype,
                 "model": model_id,
+                "gpu_memory_utilization": gpu_util,
                 "iterations": iterations,
                 "inputs": inputs or [f"synthetic:{duration:g}s"],
                 "synthetic": not inputs,
@@ -135,6 +147,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                     model_path,
                     device=device,
                     dtype=dtype,
+                    gpu_memory_utilization=gpu_util,
                     offline=bool(cfg.get("offline")),
                 )
             else:
@@ -179,6 +192,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         "device": device,
         "dtype": dtype,
         "model": model_id,
+        "gpu_memory_utilization": gpu_util,
         "load_s": load_s,
         "audio_s": round(audio_s, 3),
         "elapsed_s": round(elapsed, 3),

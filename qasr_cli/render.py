@@ -133,7 +133,9 @@ def _item_id(item: Dict[str, Any]) -> str:
 
 
 def _item_language(item: Dict[str, Any]) -> str:
-    return str(item.get("language") or "")
+    # transcribe keeps language inside result; align puts it at the top level.
+    payload = item.get("result") or {}
+    return str(payload.get("language") or item.get("language") or "")
 
 
 def _item_segments(
