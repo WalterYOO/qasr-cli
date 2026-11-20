@@ -74,7 +74,7 @@ LogFn = Callable[[str], None]
 
 # Bump when chunk records gain new semantics that older caches must not mask
 # (e.g. windows recovered from their own anchor when the reference is short).
-CHUNK_LOGIC_VERSION = 3
+CHUNK_LOGIC_VERSION = 4
 
 
 def _noop(_msg: str) -> None:

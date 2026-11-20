@@ -7,11 +7,11 @@ module only for type definitions, so the import itself stays torch-free.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Sequence
 
-from .audio import AudioInfo
+from .audio import AudioInfo, read_window_16k
 from .errors import CapabilityError, ModelError, RuntimeFailure
 from .inputs import InputItem
 from .runtime import (
@@ -30,6 +30,14 @@ from .runtime import (
 )
 
 TEXT_TRANSFORM = "qwen-asr-repetition-fix-v1"
+
+# qwen-asr only splits an ASR call at 1200s. vLLM 0.14 handles 600s requests
+# quickly but stalls on roughly >=900s of audio (GPU idle while KV cache stays
+# reserved), which made whole-file timestamp runs on long audio hang forever.
+# The vLLM backend therefore slices long calls itself, before qwen-asr sees
+# them; 600s keeps each request in the fast, non-stalling regime.
+VLLM_MAX_ASR_SECONDS = 600.0
+VLLM_ASR_SAMPLE_RATE = 16000
 
 _LANG_TAG_RE = re.compile(r"^\s*language\s+([A-Za-z][A-Za-z ()]*?)\s*\n", re.IGNORECASE)
 _CJK_RANGES = (
@@ -135,6 +143,17 @@ def clean_text(text: str) -> str:
     cleaned = str(text).replace("<asr_text>", "")
     cleaned = _LANG_TAG_RE.sub("", cleaned, count=1)
     return cleaned.strip()
+
+
+def _merge_languages(values: Sequence[Any]) -> Optional[str]:
+    """Pick the dominant non-empty language across ASR slices."""
+    cleaned = [str(value).strip() for value in values if value and str(value).strip()]
+    if not cleaned:
+        return None
+    counts: Dict[str, int] = {}
+    for value in cleaned:
+        counts[value] = counts.get(value, 0) + 1
+    return max(counts, key=lambda value: (counts[value], -cleaned.index(value)))
 
 
 def _kind_for(text: str) -> str:
@@ -543,6 +562,91 @@ class VLLMBackend(_BaseTransformersModel):
         with stdout_to_stderr():
             return self._asr.finish_streaming_transcribe(state)
 
+    def _plan_jobs(
+        self, jobs: Sequence[TranscribeJob]
+    ) -> List[tuple[int, Optional[tuple[str, int, int]], float]]:
+        """Split long inputs into vLLM-sized slices.
+
+        Returns ``(job_index, (path, start_frame, end_frame) | None, offset_s)``.
+        ``None`` keeps the original path and lets qwen-asr read it.
+        """
+        plan: List[tuple[int, Optional[tuple[str, int, int]], float]] = []
+        for index, job in enumerate(jobs):
+            info = job.info
+            path = job.item.path
+            duration = float(getattr(info, "duration_s", 0.0) or 0.0) if info else 0.0
+            sample_rate = int(getattr(info, "sample_rate", 0) or 0) if info else 0
+            frames = int(getattr(info, "frames", 0) or 0) if info else 0
+            if path is None or sample_rate <= 0:
+                plan.append((index, None, 0.0))
+                continue
+            if frames <= 0:
+                frames = int(round(duration * sample_rate))
+            else:
+                # Frames are authoritative for slicing; keep the gate and the
+                # slice arithmetic on the same clock if info is inconsistent.
+                duration = frames / sample_rate
+            if duration <= VLLM_MAX_ASR_SECONDS:
+                plan.append((index, None, 0.0))
+                continue
+            step = max(1, int(VLLM_MAX_ASR_SECONDS * sample_rate))
+            start = 0
+            while start < frames:
+                end = min(frames, start + step)
+                plan.append((index, (str(path), start, end), start / sample_rate))
+                start = end
+        return plan
+
+    @staticmethod
+    def _slice_audio(part: Optional[tuple[str, int, int]]) -> Any:
+        if part is None:
+            return None
+        path, start, end = part
+        return (read_window_16k(path, start, end), VLLM_ASR_SAMPLE_RATE)
+
+    def _build_result(
+        self,
+        job: TranscribeJob,
+        chunks: Sequence[tuple[Any, float]],
+        need_align: bool,
+        granularity: str,
+    ) -> TranscribeResult:
+        # Clean per slice: only the first slice would lose a leading
+        # ``language X`` line if cleaning happened after the join.
+        text = "".join(
+            clean_text(getattr(raw, "text", "") or "") for raw, _ in chunks
+        )
+        language = _merge_languages(
+            [getattr(raw, "language", "") for raw, _ in chunks]
+        )
+        segments: List[Segment] = []
+        for raw, offset in chunks:
+            part = segments_from_timestamps(
+                getattr(raw, "time_stamps", None) if need_align else None,
+                granularity,
+            )
+            if offset:
+                part = [
+                    replace(seg, start=seg.start + offset, end=seg.end + offset)
+                    for seg in part
+                ]
+            segments.extend(part)
+        raw_segments = list(segments)
+        if granularity == "sentence" and segments:
+            segments = aggregate_sentences(segments)
+        warnings: List[str] = []
+        if need_align and text and not segments:
+            warnings.append("timestamps were requested but the aligner returned no items")
+        return TranscribeResult(
+            text=text,
+            language=language,
+            language_source="forced" if job.language else "auto",
+            segments=segments,
+            timestamp_source="forced_aligner" if segments else None,
+            warnings=warnings,
+            raw_segments=raw_segments,
+        )
+
     def transcribe(self, jobs: Sequence[TranscribeJob], opts: TranscribeOptions) -> List[TranscribeResult]:
         if not jobs:
             return []
@@ -554,43 +658,32 @@ class VLLMBackend(_BaseTransformersModel):
             )
         self.ensure_loaded(need_align=need_align)
         self._apply_token_budget(opts.max_new_tokens)
-        audios = [str(job.item.path) for job in jobs]
-        contexts: List[str] = [job.context or "" for job in jobs]
-        languages: List[Optional[str]] = [job.language for job in jobs]
-        with stdout_to_stderr():
-            raw_results = self._asr.transcribe(
-                audio=audios,
-                context=contexts,
-                language=languages,
-                return_time_stamps=need_align,
-            )
-        results: List[TranscribeResult] = []
-        for job, raw in zip(jobs, raw_results):
-            text = clean_text(getattr(raw, "text", "") or "")
-            language = (getattr(raw, "language", "") or "").strip() or None
-            source = "forced" if job.language else "auto"
-            segments = segments_from_timestamps(
-                getattr(raw, "time_stamps", None) if need_align else None,
-                opts.granularity,
-            )
-            raw_segments = list(segments)
-            if opts.granularity == "sentence" and segments:
-                segments = aggregate_sentences(segments)
-            warnings: List[str] = []
-            if need_align and text and not segments:
-                warnings.append("timestamps were requested but the aligner returned no items")
-            results.append(
-                TranscribeResult(
-                    text=text,
-                    language=language,
-                    language_source=source,
-                    segments=segments,
-                    timestamp_source="forced_aligner" if segments else None,
-                    warnings=warnings,
-                    raw_segments=raw_segments,
+
+        plan = self._plan_jobs(jobs)
+        chunks_by_job: List[List[tuple[Any, float]]] = [[] for _ in jobs]
+        batch_size = max(1, int(self.max_inference_batch_size or 1))
+        for start in range(0, len(plan), batch_size):
+            batch = plan[start:start + batch_size]
+            audios = [
+                str(jobs[index].item.path)
+                if part is None
+                else self._slice_audio(part)
+                for index, part, _ in batch
+            ]
+            with stdout_to_stderr():
+                raw_results = self._asr.transcribe(
+                    audio=audios,
+                    context=[jobs[index].context or "" for index, _, _ in batch],
+                    language=[jobs[index].language for index, _, _ in batch],
+                    return_time_stamps=need_align,
                 )
-            )
-        return results
+            for (index, _, offset), raw in zip(batch, raw_results):
+                chunks_by_job[index].append((raw, offset))
+
+        return [
+            self._build_result(job, chunks, need_align, opts.granularity)
+            for job, chunks in zip(jobs, chunks_by_job)
+        ]
 
     def align(self, jobs: Sequence[AlignJob], opts: AlignOptions) -> List[AlignResult]:
         if not jobs:

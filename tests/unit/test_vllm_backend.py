@@ -6,9 +6,11 @@ import os
 import sys
 import types
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
+from qasr_cli.audio import AudioInfo
 from qasr_cli.backends import (
     AlignJob,
     AlignOptions,
@@ -152,6 +154,132 @@ def test_vllm_forwards_per_call_token_budget(monkeypatch, tmp_path):
 
     backend.transcribe([_job(wav)], TranscribeOptions())
     assert _Engine.instances[0].sampling_params.max_tokens == 512
+
+
+def _long_job(
+    wav: Path, seconds: float, *, reported_seconds: Optional[float] = None
+) -> TranscribeJob:
+    info = AudioInfo(
+        path=wav,
+        duration_s=seconds if reported_seconds is None else reported_seconds,
+        sample_rate=16000,
+        channels=1,
+        frames=int(seconds * 16000),
+        format="WAV",
+    )
+    item = InputItem(id=wav.stem, source=str(wav), path=wav)
+    return TranscribeJob(item=item, info=info, language="Chinese")
+
+
+def _fake_slices(monkeypatch):
+    import numpy as np
+
+    # _install_fakes pretends to be Linux, which makes soundfile load
+    # libsndfile.so; the slicing arithmetic is what matters here.
+    monkeypatch.setattr(
+        "qasr_cli.backends.read_window_16k",
+        lambda _path, start, end: np.zeros(end - start, dtype="float32"),
+    )
+
+
+def test_vllm_slices_long_asr_calls(monkeypatch, tmp_path):
+    """A >600s call must be split: vLLM stalls on single ~900s+ requests."""
+    _install_fakes(monkeypatch)
+    _fake_slices(monkeypatch)
+    monkeypatch.setattr("qasr_cli.backends.VLLM_MAX_ASR_SECONDS", 4.0)
+    wav = write_wav(tmp_path / "long.wav", seconds=10)
+    backend = VLLMBackend(tmp_path, device="cuda")
+    calls = []
+
+    class _ChunkASR:
+        sampling_params = types.SimpleNamespace(max_tokens=512)
+
+        def transcribe(self, *, audio, context, language, return_time_stamps=False):
+            calls.append([a[0].shape[0] if isinstance(a, tuple) else a for a in audio])
+            languages = ["Chinese", "English", "Chinese"]
+            return [
+                _Raw(f"language Chinese\npart{len(calls)}", languages[len(calls) - 1])
+                for _ in audio
+            ]
+
+    backend._asr = _ChunkASR()
+    result = backend.transcribe(
+        [_long_job(wav, 10.0)], TranscribeOptions()
+    )[0]
+    assert calls == [[64000], [64000], [32000]]
+    assert result.text == "part1part2part3"
+    assert result.language == "Chinese"  # majority across slices
+    assert result.language_source == "forced"
+
+
+def test_vllm_slices_on_frames_when_info_is_inconsistent(monkeypatch, tmp_path):
+    """Frames decide slicing, so a stale duration_s cannot skip the split."""
+    _install_fakes(monkeypatch)
+    _fake_slices(monkeypatch)
+    monkeypatch.setattr("qasr_cli.backends.VLLM_MAX_ASR_SECONDS", 4.0)
+    wav = write_wav(tmp_path / "long.wav", seconds=10)
+    backend = VLLMBackend(tmp_path, device="cuda")
+    calls = []
+
+    class _ChunkASR:
+        sampling_params = types.SimpleNamespace(max_tokens=512)
+
+        def transcribe(self, *, audio, context, language, return_time_stamps=False):
+            calls.extend(audio)
+            return [_Raw("x", "Chinese") for _ in audio]
+
+    backend._asr = _ChunkASR()
+    backend.transcribe(
+        [_long_job(wav, 10.0, reported_seconds=1.0)], TranscribeOptions()
+    )
+    assert len(calls) == 3
+
+
+def test_vllm_offsets_segments_across_slices(monkeypatch, tmp_path):
+    _install_fakes(monkeypatch)
+    _fake_slices(monkeypatch)
+    monkeypatch.setattr("qasr_cli.backends.VLLM_MAX_ASR_SECONDS", 4.0)
+    wav = write_wav(tmp_path / "long.wav", seconds=10)
+    aligner = tmp_path / "aligner"
+    aligner.mkdir()
+    backend = VLLMBackend(tmp_path, device="cuda", aligner_path=aligner)
+    backend._aligner = object()
+
+    class _ChunkASR:
+        sampling_params = types.SimpleNamespace(max_tokens=512)
+
+        def transcribe(self, *, audio, context, language, return_time_stamps=False):
+            assert return_time_stamps
+            return [
+                _Raw("w", "Chinese", _StampResult([_StampItem("w", 0.0, 0.5)]))
+                for _ in audio
+            ]
+
+    backend._asr = _ChunkASR()
+    result = backend.transcribe(
+        [_long_job(wav, 10.0)],
+        TranscribeOptions(timestamps=True, granularity="word"),
+    )[0]
+    assert [segment.start for segment in result.segments] == [0.0, 4.0, 8.0]
+    assert [segment.end for segment in result.segments] == [0.5, 4.5, 8.5]
+
+
+def test_vllm_short_call_keeps_path_payload(monkeypatch, tmp_path):
+    _install_fakes(monkeypatch)
+    wav = write_wav(tmp_path / "short.wav", seconds=2)
+    backend = VLLMBackend(tmp_path, device="cuda")
+    seen = {}
+
+    class _ChunkASR:
+        sampling_params = types.SimpleNamespace(max_tokens=512)
+
+        def transcribe(self, *, audio, context, language, return_time_stamps=False):
+            seen["audio"] = list(audio)
+            return [_Raw("short", "Chinese")]
+
+    backend._asr = _ChunkASR()
+    backend.transcribe([_long_job(wav, 2.0)], TranscribeOptions())
+    assert seen["audio"] == [str(wav)]
 
 
 def test_vllm_timestamp_path_uses_aligner(monkeypatch, tmp_path):

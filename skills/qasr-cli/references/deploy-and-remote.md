@@ -2,7 +2,7 @@
 
 # 部署与远程
 
-版本基线 `qasr 0.3.3`。三条边界先记住：
+版本基线 `qasr 0.3.4`。三条边界先记住：
 
 - `serve` 只在 Linux + CUDA + `[vllm]` 下真正可用；`serve --dry-run` 跨平台但只证明 argv。
 - 远程只做文本/LID/context/批量；**没有**时间戳、`align`、`stream`。
@@ -105,7 +105,10 @@ qasr --json --backend vllm --gpu-memory-utilization 0.5 transcribe a.wav
 - `--device cuda:N` 会在 import torch 前设 `CUDA_VISIBLE_DEVICES`；
   `--device mps` 配 vLLM 会失败。`dtype=auto`：CUDA→bf16、MPS→fp16、CPU→fp32。
 - vLLM 对 `transformers==4.57.6`、`vllm==0.14.0` 有钉死要求；用 `uv tool` 隔离，
-  不要把 `[vllm]` 装进 macOS 主环境。
+  不要把 `[vllm]` 装进 macOS 主环境。装 `[vllm]` 会把 torch 降到 vLLM 钉的 2.9.1。
+- 长音频：vLLM 后端会把单次 >600s 的 ASR 调用先切成 ≤600s 再送模型（qwen-asr 自身
+  到 1200s 才切）。这是为了避开 vLLM 0.14 在 24G 卡上 ≥900s 单请求卡死；切片对
+  输出文本透明，不产生 warning。
 
 ## 快速决策
 

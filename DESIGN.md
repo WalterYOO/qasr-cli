@@ -345,6 +345,8 @@ class Backend(Protocol):
 | macOS/MPS | ✅ | ❌ | ✅ |
 | Linux/CUDA | ✅ | ✅ | ✅ |
 
+- vLLM 后端在送模型前会把单次 >600s 的 ASR 调用切成 ≤600s 的片段（qwen-asr 自身只在 1200s 处切）。原因：vLLM 0.14 在 24G 卡上处理 ≥900s 的单请求会空转（GPU 0%、KV cache 已占，永久等待），长音频时间戳的整文件 canonical pass 会卡死；600s 请求稳定且快。切片按顺序拼回文本，时间戳按切片偏移合并。
+
 ### 5.1 三种运行形态与 GPU 的关系
 
 "有没有 GPU"和"要不要远程"是两个独立问题。qasr 有三种形态：
