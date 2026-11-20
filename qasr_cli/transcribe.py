@@ -72,6 +72,10 @@ from .render import (
 
 LogFn = Callable[[str], None]
 
+# Bump when chunk records gain new semantics that older caches must not mask
+# (e.g. windows recovered from their own anchor when the reference is short).
+CHUNK_LOGIC_VERSION = 2
+
 
 def _noop(_msg: str) -> None:
     return None
@@ -393,6 +397,10 @@ def _run_locked(
             "formats": sorted(spec.formats),
             "max_new_tokens": max_tokens,
             "model": settings.model_id,
+            # Chunk attribution/fallback is code semantics, not an input:
+            # without it, --resume would keep outputs produced by an older
+            # implementation even though the logic changed.
+            "chunk_logic_version": CHUNK_LOGIC_VERSION,
         }
         output_rel = ",".join(f"{spec.output_base}.{fmt}" for fmt in spec.formats)
         spec.job_key = compute_job_key(
@@ -972,6 +980,7 @@ def _chunk_identity(
         "aligner_fingerprint": settings.aligner_fingerprint,
         "backend": settings.backend_name,
         "qasr_version": __version__,
+        "chunk_logic_version": CHUNK_LOGIC_VERSION,
     }
     return sha256_bytes(canonical_json(payload).encode("utf-8"))
 
@@ -1199,8 +1208,31 @@ def _long_timestamps(
         anchors.append(str(record.get("anchor_text") or ""))
 
     spans = long_audio.attribute_reference(canonical.text, anchors)
-    items: List[Any] = []
+    # The whole-file reference pass can be shorter than the audio (model or
+    # token-budget truncation), leaving later windows with an empty span. The
+    # window's own anchor is already a transcript of that exact window, so
+    # fall back to aligning it instead of silently dropping the speech.
+    effective_texts: List[str] = []
+    fallback_indexes: List[int] = []
     for window, span in zip(windows, spans):
+        text = span.text
+        # A weak span covers so little of the window that aligning it would
+        # leave most of the window's speech out; a span whose tail is missing
+        # can still be >= 50% overall while dropping the window's ending.
+        # Prefer the window's own ASR anchor in both cases, not just when the
+        # span is empty.
+        if (span.is_incomplete or not text.strip()) and anchors[window.index].strip():
+            text = anchors[window.index]
+            fallback_indexes.append(window.index)
+        effective_texts.append(text)
+    if fallback_indexes:
+        warnings.extend(
+            f"chunk_anchor_fallback:{index}" for index in fallback_indexes
+        )
+        warnings.append(f"canonical_reference_incomplete:{len(fallback_indexes)}")
+
+    items: List[Any] = []
+    for position, (window, span) in enumerate(zip(windows, spans)):
         identity = _chunk_identity(spec, window, settings)
         record = _read_chunk(chunk_dir, window.index, identity, resume=settings.resume)
         if record is not None and record.get("items") is not None:
@@ -1212,7 +1244,8 @@ def _long_timestamps(
             warnings.append(
                 f"chunk_reference_match_low:{window.index}:{span.match_ratio:.2f}"
             )
-        if not span.text.strip():
+        align_text = effective_texts[position]
+        if not align_text.strip():
             _write_chunk(chunk_dir, window.index, identity,
                          {"anchor_text": anchors[window.index],
                           "items": [], "warnings": []})
@@ -1230,7 +1263,7 @@ def _long_timestamps(
         window_warnings: List[str] = []
         try:
             aligned = backend.align(
-                [AlignJob(item=item, info=window_info, text=span.text,
+                [AlignJob(item=item, info=window_info, text=align_text,
                           language=language)],
                 AlignOptions(granularity="word"),
             )[0]
@@ -1266,12 +1299,21 @@ def _long_timestamps(
         )
         warnings.extend(window_warnings)
 
+    if fallback_indexes:
+        # canonical.text stops where the reference pass stopped; rebuild from
+        # the per-window texts so the output text matches the recovered tail.
+        text = ""
+        for piece in effective_texts:
+            text = _join_window_text(text, piece)
+    else:
+        text = canonical.text
+
     merged = long_audio.merge_items(items, duration_s=spec.info.duration_s)
     segments = (
         aggregate_sentences(merged) if spec.granularity == "sentence" else merged
     )
     return TranscribeResult(
-        text=canonical.text,
+        text=text,
         language=canonical.language,
         language_source=canonical.language_source,
         segments=segments,

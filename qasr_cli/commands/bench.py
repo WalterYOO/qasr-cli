@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .. import SCHEMA_VERSION
-from ..audio import AudioInfo, probe, write_wav_16k
+from ..audio import AudioInfo, max_new_tokens_for, probe, write_wav_16k
 from ..backends import TranscribeJob, TranscribeOptions
 from ..catalog import require_local, resolve_model
 from ..errors import EXIT_OK, UsageError
@@ -122,6 +122,14 @@ def handle(ns: Any, ctx: CommandContext) -> int:
             item = InputItem(id="synthetic", source=str(path), path=path, origin="file")
             work.append({"item": item, "info": info, "synthetic": True})
 
+        # qwen-asr defaults model-level generation to 512 tokens. Without an
+        # explicit duration-derived budget, every input longer than a few
+        # minutes stops mid-transcript, making the reported RTF a measure of
+        # truncated work rather than of real transcription.
+        token_budget = max(
+            max_new_tokens_for(entry["info"].duration_s) for entry in work
+        )
+
         warnings: List[str] = []
         started = time.perf_counter()
         if is_remote:
@@ -150,6 +158,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                     model_path,
                     device=device,
                     dtype=dtype,
+                    max_new_tokens=token_budget,
                     gpu_memory_utilization=gpu_util,
                     offline=bool(cfg.get("offline")),
                 )
@@ -160,6 +169,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                     model_path,
                     device=device,
                     dtype=dtype,
+                    max_new_tokens=token_budget,
                     offline=bool(cfg.get("offline")),
                 )
             ensure = getattr(backend, "ensure_loaded", None)
@@ -180,7 +190,9 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                             language=None,
                         )
                     ],
-                    TranscribeOptions(timestamps=False),
+                    TranscribeOptions(
+                        timestamps=False, max_new_tokens=token_budget
+                    ),
                 )
                 elapsed += time.perf_counter() - begin
                 audio_s += entry["info"].duration_s
@@ -200,6 +212,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
         "audio_s": round(audio_s, 3),
         "elapsed_s": round(elapsed, 3),
         "rtf": rtf,
+        "max_new_tokens": token_budget,
         "iterations": iterations,
         "peak_memory_mb": _peak_memory_mb(),
         "synthetic": all(entry["synthetic"] for entry in work),

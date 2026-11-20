@@ -176,6 +176,35 @@ def test_bench_synthetic_json(capsys, model_factory, monkeypatch):
     assert payload["synthetic"] is True
 
 
+def test_bench_passes_duration_scaled_token_budget(capsys, model_factory, monkeypatch):
+    """bench must not leave qwen-asr at its 512-token default."""
+    from qasr_cli.audio import max_new_tokens_for
+
+    model_factory("Qwen3-ASR-1.7B")
+    seen = {}
+
+    class BudgetBackend(FakeBackend):
+        def transcribe(self, jobs, opts):
+            seen["opts"] = opts
+            return super().transcribe(jobs, opts)
+
+    import qasr_cli.backends as backends
+
+    def build(*args, **kwargs):
+        seen["kwargs"] = kwargs
+        return BudgetBackend()
+
+    monkeypatch.setattr(backends, "build_transformers_backend", build)
+    code = main([
+        "--device", "cpu", "--dtype", "fp32",
+        "bench", "--json", "--duration", "400", "--iterations", "1",
+    ])
+    assert code == 0, capsys.readouterr()
+    expected = max_new_tokens_for(400.0)
+    assert seen["kwargs"]["max_new_tokens"] == expected
+    assert seen["opts"].max_new_tokens == expected
+
+
 def test_models_show_and_dry_run_rm(capsys, model_factory):
     model_factory("Qwen3-ASR-1.7B")
     code = main(["models", "show", "1.7b", "--json"])

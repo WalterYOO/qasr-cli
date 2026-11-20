@@ -218,3 +218,36 @@ def test_attribute_reference_covers_window_spanning_two_sentences():
     assert span.start_char == 0
     assert span.end_char == len(ref)
     assert span.match_ratio == 1.0
+
+
+def test_attribute_reference_flags_reference_stopping_inside_window():
+    """60% overall match but no tail text is still incomplete coverage."""
+    ref = "abcdefghijkl"  # 12 chars, ends at 60% of the window
+    window = "abcdefghijklmnopqrst"
+    span = attribute_reference(ref, [window])[0]
+    assert span.match_ratio >= 0.5
+    assert span.is_incomplete
+    assert span.tail_match_ratio == 0.0
+
+
+def test_attribute_reference_stays_on_one_diagonal():
+    """A repeated tail phrase later in the reference must not extend a window.
+
+    Regression: the first-to-last block chain let window 2 swallow window 3
+    plus a long unrelated passage, jumped the cursor to the end of the
+    reference, and starved every later window (chunk_reference_match_low:0.00).
+    """
+    w0 = "alpha beta gamma"
+    w1 = "delta epsilon zeta"
+    w2 = "eta theta iota kappa"
+    w3 = "lambda mu nu xi"
+    filler = "omicron pi rho sigma tau upsilon phi chi psi omega " * 3
+    ref = f"{w0} {w1} eta theta {w3} {filler} iota kappa"
+    spans = attribute_reference(ref, [w0, w1, w2, w3])
+    # The boundary character may land on either side of the split; what matters
+    # is that the span stops at window 2's own text instead of the far copy.
+    assert spans[2].text.startswith("eta thet")
+    assert w3 not in spans[2].text
+    assert spans[2].end_char < ref.index(w3)
+    assert spans[3].text == w3
+    assert spans[3].match_ratio > 0.8

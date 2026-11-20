@@ -2,7 +2,7 @@
 
 # 运维：模型、配置、诊断与周边
 
-版本基线 `qasr 0.3.0`。
+版本基线 `qasr 0.3.1`。
 
 ## 模型解析
 
@@ -106,8 +106,10 @@ qasr --json bench --duration 5 --dry-run
 ```
 
 - 无 INPUT 时用合成音频，`--duration` 默认 10 s；`--iterations` 默认 3。
-- 字段在顶层：`rtf load_s audio_s elapsed_s iterations peak_memory_mb`；**没有 `.metrics`**。
+- 字段在顶层：`rtf load_s audio_s elapsed_s max_new_tokens iterations peak_memory_mb`；**没有 `.metrics`**。
 - 只测吞吐/RTF，不承诺准确率；远程 bench 把网络时间计入 RTF（带 warning）。
+- `max_new_tokens` 按最长输入时长自动取（`min(16384, max(1024, dur*8+256))`），
+  避免 qwen-asr 的 512 默认值把长音频生成提前截断、导致 RTF 只统计了半段工作量。
 - `--dry-run` 打印计划，不加载权重。
 
 ## completion

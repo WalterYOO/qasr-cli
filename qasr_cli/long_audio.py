@@ -20,6 +20,21 @@ DEFAULT_SEARCH_SECONDS = 5.0
 MIN_CORE_SLACK_SECONDS = 2.0
 MERGE_EPSILON = 0.001
 MIN_MATCH_RATIO = 0.5
+# A window's text and its reference slice describe the same speech, so true
+# matching blocks sit on one diagonal. Blocks off that diagonal are repeated
+# phrases elsewhere in the reference; including them lets one window claim
+# several windows' worth of text and starves every later window.
+MATCH_BAND_RATIO = 0.4
+MATCH_BAND_MIN = 60
+CANDIDATE_MULTIPLIER = 2.0
+CANDIDATE_PAD = 200
+MAX_SPAN_MULTIPLIER = 2.0
+MAX_SPAN_PAD = 200
+# A reference that ends inside a window can still match >= MIN_MATCH_RATIO of
+# the window's characters. Check the window's tail separately so that partial
+# coverage is not mistaken for full coverage.
+TAIL_START_RATIO = 0.8
+MIN_TAIL_MATCH_RATIO = 0.2
 
 
 @dataclass(frozen=True)
@@ -57,10 +72,18 @@ class TextSpan:
     end_char: int
     match_ratio: float
     text: str = ""
+    # Fraction of the window text's final TAIL_START_RATIO..1.0 slice covered
+    # by matching blocks. A reference that stops inside the window can still
+    # reach MIN_MATCH_RATIO overall while this tail is empty.
+    tail_match_ratio: float = 1.0
 
     @property
     def is_weak(self) -> bool:
         return self.match_ratio < MIN_MATCH_RATIO
+
+    @property
+    def is_incomplete(self) -> bool:
+        return self.is_weak or self.tail_match_ratio < MIN_TAIL_MATCH_RATIO
 
 
 def _check_params(
@@ -231,30 +254,87 @@ def attribute_reference(
         # reference does not let the longest block jump far ahead.
         window_len = len(window_norm)
         remaining = len(norm_ref) - cursor
-        k = min(max(window_len * 3 + 200, window_len), remaining)
+        k = min(
+            max(int(window_len * CANDIDATE_MULTIPLIER) + CANDIDATE_PAD, window_len),
+            remaining,
+        )
         matcher = difflib.SequenceMatcher(
             None, norm_ref[cursor:cursor + k], window_norm, autojunk=False
         )
         blocks = [block for block in matcher.get_matching_blocks() if block.size > 0]
-        # Keep a chain that advances through the window monotonically: repeated
-        # reference phrases produce several blocks mapped to the same window
-        # offset, and only the first occurrence belongs to this window.
-        chain: List[Any] = []
-        window_end = 0
-        for block in blocks:
-            if block.b >= window_end:
-                chain.append(block)
-                window_end = block.b + block.size
-        if not chain:
+        if not blocks:
             position = _offset_at(offsets, cursor, len(ref_text))
             spans.append(TextSpan(index, position, position, 0.0))
             continue
-        # Own everything between the first and last matching block. Small
-        # substitutions/insertions inside that range belong to this window.
-        ref_start_norm = cursor + chain[0].a
-        ref_end_norm = cursor + chain[-1].a + chain[-1].size
+        # The window text and its true reference slice are the same speech, so
+        # their matching blocks lie on one diagonal (a - b constant). Repeated
+        # phrases elsewhere in the reference sit on other diagonals: including
+        # them lets a window swallow later windows, so pick the single diagonal
+        # that explains the most characters and ignore everything outside it.
+        band = max(MATCH_BAND_MIN, int(window_len * MATCH_BAND_RATIO))
+        best_chain: List[Any] = []
+        best_score = -1
+        for anchor in blocks:
+            delta = anchor.a - anchor.b
+            chain: List[Any] = []
+            window_end = 0
+            for block in blocks:
+                if abs((block.a - block.b) - delta) > band:
+                    continue
+                # Repeated reference phrases map to the same window offset;
+                # only the occurrence that advances the window belongs here.
+                if block.b < window_end:
+                    continue
+                chain.append(block)
+                window_end = block.b + block.size
+            matched = sum(block.size for block in chain)
+            # Prefer dense, nearby diagonals: a band that matches a few
+            # characters and then jumps over a long passage explains the window
+            # worse than a compact band, even when the jump lands on a longer
+            # repeated tail. Windows tile the audio, so the true slice also
+            # starts near the cursor; distance is weak evidence, not a veto.
+            span = chain[-1].a + chain[-1].size - chain[0].a
+            excess = max(0, span - matched)
+            score = matched / (
+                1.0 + (excess + chain[0].a) / max(1, window_len)
+            )
+            if score > best_score or (
+                score == best_score
+                and chain
+                and best_chain
+                and chain[0].a < best_chain[0].a
+            ):
+                best_score = score
+                best_chain = chain
+        if not best_chain:
+            position = _offset_at(offsets, cursor, len(ref_text))
+            spans.append(TextSpan(index, position, position, 0.0))
+            continue
+        # Own everything between the first and last in-band matching block.
+        # Small substitutions/insertions inside that range belong to this
+        # window; the cap keeps a pathological chain from spanning far more
+        # text than the window itself.
+        max_span = int(window_len * MAX_SPAN_MULTIPLIER) + MAX_SPAN_PAD
+        ref_start_norm = cursor + best_chain[0].a
+        ref_end_norm = cursor + best_chain[-1].a + best_chain[-1].size
+        ref_end_norm = min(ref_end_norm, ref_start_norm + max_span)
+        chain = [block for block in best_chain if cursor + block.a < ref_end_norm]
+        if not chain:
+            chain = best_chain[:1]
+        ref_end_norm = min(ref_end_norm, cursor + chain[-1].a + chain[-1].size)
         matched = sum(block.size for block in chain)
         ratio = min(1.0, matched / max(1, window_len))
+        tail_start = int(window_len * TAIL_START_RATIO)
+        tail_len = window_len - tail_start
+        tail_matched = 0
+        if tail_len > 0:
+            covered = set()
+            for block in chain:
+                covered.update(range(block.b, block.b + block.size))
+            tail_matched = sum(
+                1 for position in range(tail_start, window_len) if position in covered
+            )
+        tail_ratio = tail_matched / tail_len if tail_len > 0 else 1.0
         start_char = offsets[ref_start_norm]
         end_char = offsets[ref_end_norm - 1] + 1
         spans.append(
@@ -264,6 +344,7 @@ def attribute_reference(
                 end_char,
                 round(ratio, 4),
                 ref_text[start_char:end_char],
+                round(tail_ratio, 4),
             )
         )
         cursor = ref_end_norm

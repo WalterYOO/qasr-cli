@@ -376,6 +376,67 @@ class _FakeASR:
         return [_RawResult("你好。再见", items)]
 
 
+class _BudgetASR:
+    """Model stub that records the generate cap seen at call time."""
+
+    def __init__(self, default=512):
+        self.max_new_tokens = default
+        self.seen = []
+
+    def transcribe(self, **kwargs):
+        self.seen.append(self.max_new_tokens)
+        return [type("Raw", (), {"text": "ok", "language": "Chinese",
+                                 "time_stamps": None})()]
+
+
+def _budget_backend(tmp_path, monkeypatch, **kwargs):
+    from qasr_cli.backends import TransformersBackend
+
+    backend = TransformersBackend(tmp_path, **kwargs)
+    backend._asr = _BudgetASR()
+    monkeypatch.setattr(backend, "ensure_loaded", lambda need_align=False: None)
+    return backend
+
+
+def _budget_job(tmp_path):
+    from qasr_cli.audio import AudioInfo
+    from qasr_cli.backends import TranscribeJob
+
+    wav = write_wav(tmp_path / "a.wav")
+    return TranscribeJob(
+        item=InputItem(id="a", source=str(wav), path=wav),
+        info=AudioInfo(path=wav, duration_s=1140.0, sample_rate=16000,
+                       channels=1, frames=1140 * 16000),
+        language="Chinese",
+    )
+
+
+def test_backend_forwards_per_call_token_budget(monkeypatch, tmp_path):
+    """A 19-min reference pass must not be capped at the model default 512."""
+    from qasr_cli.backends import TranscribeOptions
+
+    backend = _budget_backend(tmp_path, monkeypatch)
+    backend.transcribe([_budget_job(tmp_path)],
+                       TranscribeOptions(max_new_tokens=9376))
+    assert backend._asr.seen == [9376]
+
+
+def test_backend_keeps_explicit_token_cap_without_option(monkeypatch, tmp_path):
+    from qasr_cli.backends import TranscribeOptions
+
+    backend = _budget_backend(tmp_path, monkeypatch, max_new_tokens=4096)
+    backend.transcribe([_budget_job(tmp_path)], TranscribeOptions())
+    assert backend._asr.seen == [4096]
+
+
+def test_backend_defaults_to_512_without_any_budget(monkeypatch, tmp_path):
+    from qasr_cli.backends import TranscribeOptions
+
+    backend = _budget_backend(tmp_path, monkeypatch)
+    backend.transcribe([_budget_job(tmp_path)], TranscribeOptions())
+    assert backend._asr.seen == [512]
+
+
 def test_backend_sentence_granularity_aggregates_json_segments(monkeypatch, tmp_path):
     from qasr_cli.audio import AudioInfo
     from qasr_cli.backends import (

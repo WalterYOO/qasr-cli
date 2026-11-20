@@ -273,6 +273,25 @@ class _BaseTransformersModel:
     def capabilities(self) -> Capabilities:
         return Capabilities(name=self.name)
 
+    def _apply_token_budget(self, requested: Optional[int]) -> None:
+        """Push the caller's per-request budget into qwen-asr's generate caps.
+
+        qwen-asr has no per-call ``max_new_tokens`` argument: the transformers
+        backend reads ``model.max_new_tokens`` and the vLLM backend reads
+        ``sampling_params.max_tokens``. Both default to 512, which silently
+        truncates any single library chunk longer than a few minutes (the
+        library allows 1200s per ASR chunk). ``TranscribeOptions`` carries the
+        duration-derived budget; apply it before every call so long-audio
+        windows and the whole-file reference pass are not cut at 512 tokens.
+        """
+        budget = int(requested or self.max_new_tokens or 512)
+        asr = self._asr
+        sampling = getattr(asr, "sampling_params", None)
+        if sampling is not None and hasattr(sampling, "max_tokens"):
+            sampling.max_tokens = budget
+        elif hasattr(asr, "max_new_tokens"):
+            asr.max_new_tokens = budget
+
 
 class TransformersBackend(_BaseTransformersModel):
     """Local transformers backend (CUDA / MPS / CPU)."""
@@ -337,6 +356,7 @@ class TransformersBackend(_BaseTransformersModel):
                 hint="qasr models pull aligner",
             )
         self.ensure_loaded(need_align=need_align)
+        self._apply_token_budget(opts.max_new_tokens)
 
         audios = [str(job.item.path) for job in jobs]
         contexts: List[str] = [job.context or "" for job in jobs]
@@ -533,6 +553,7 @@ class VLLMBackend(_BaseTransformersModel):
                 hint="qasr models pull aligner",
             )
         self.ensure_loaded(need_align=need_align)
+        self._apply_token_budget(opts.max_new_tokens)
         audios = [str(job.item.path) for job in jobs]
         contexts: List[str] = [job.context or "" for job in jobs]
         languages: List[Optional[str]] = [job.language for job in jobs]

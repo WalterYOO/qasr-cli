@@ -578,7 +578,8 @@ class Backend(Protocol):
 
 ### P1
 
-- `long_audio.py`：纯函数窗口规划（核心区 + 重叠上下文，静音边界），每窗一次 ASR 得局部文本，单调匹配把参考文本归属到窗口，再 `align()`，最后合并并强制时间单调。
+- `long_audio.py`：纯函数窗口规划（核心区 + 重叠上下文，静音边界），每窗一次 ASR 得局部文本，单调匹配把参考文本归属到窗口，再 `align()`，最后合并并强制时间单调。归属时只认匹配块的同一条对角线（`a-b` 带内），并限制单窗跨度；否则重复语句会让某个窗口吞掉后文，游标跳到最后，后续窗口全部匹配失败。
+- 时间戳长音频的 canonical 全文 ASR 可能短于音频（模型提前结束或 token 预算截断），也可能在某个窗口内部提前结束。窗口匹配率过低、或窗口尾部一段没有参考文本时，回退到该窗口自身的 ASR 锚点做对齐，输出 `chunk_anchor_fallback:<index>` 与 `canonical_reference_incomplete:<count>`，不静默丢弃音频尾部。`CHUNK_LOGIC_VERSION` 同时进入窗口 chunk key 与 item-level job key，升级后 `--resume` 不会复用旧逻辑的完成记录。
 - 参考 qtts `long_align.py`（默认 270s 窗口、3s 重叠、覆盖率 0.5），但不 import qtts。
 - 转写侧 `--max-chunk-seconds` 自管切块，用于进度、内存上限与断点续跑；切块后硬裁剪。
 

@@ -50,6 +50,11 @@ class _Engine:
 
     def __init__(self, **kwargs):
         self.transcribe_kwargs = kwargs
+        # The real Qwen3ASRModel.LLM object exposes sampling_params, which is
+        # where vLLM reads max_tokens from.
+        self.sampling_params = types.SimpleNamespace(
+            max_tokens=kwargs.get("max_new_tokens")
+        )
         type(self).instances.append(self)
 
     def transcribe(self, *, audio, context, language, return_time_stamps=False):
@@ -136,6 +141,17 @@ def test_vllm_constructor_kwargs_and_batch(monkeypatch, tmp_path):
     assert engine.last_call["return_time_stamps"] is False
     assert [result.text for result in results] == ["text-0", "text-1"]
     assert results[0].language_source == "forced"
+
+
+def test_vllm_forwards_per_call_token_budget(monkeypatch, tmp_path):
+    _install_fakes(monkeypatch)
+    wav = write_wav(tmp_path / "a.wav", seconds=0.2)
+    backend = build_vllm_backend(tmp_path)
+    backend.transcribe([_job(wav)], TranscribeOptions(max_new_tokens=9376))
+    assert _Engine.instances[0].sampling_params.max_tokens == 9376
+
+    backend.transcribe([_job(wav)], TranscribeOptions())
+    assert _Engine.instances[0].sampling_params.max_tokens == 512
 
 
 def test_vllm_timestamp_path_uses_aligner(monkeypatch, tmp_path):
