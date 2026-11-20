@@ -2,7 +2,7 @@
 
 # 部署与远程
 
-版本基线 `qasr 0.3.2`。三条边界先记住：
+版本基线 `qasr 0.3.3`。三条边界先记住：
 
 - `serve` 只在 Linux + CUDA + `[vllm]` 下真正可用；`serve --dry-run` 跨平台但只证明 argv。
 - 远程只做文本/LID/context/批量；**没有**时间戳、`align`、`stream`。
