@@ -373,6 +373,11 @@ class RemoteOptions:
     timeout: float = 300.0
     retries: int = 2
     log: Optional[Callable[[str], None]] = None
+    # Sent as max_completion_tokens so a server-side default (e.g. vLLM's
+    # max_model_len or qwen-asr's 512) does not truncate long inputs. Only
+    # callers that need a guaranteed budget, such as bench, set it; transcribe
+    # leaves it None so the server keeps its own default.
+    max_new_tokens: Optional[int] = None
 
 
 class RemoteBackend:
@@ -386,6 +391,7 @@ class RemoteBackend:
         self.timeout = float(options.timeout)
         self.retries = max(0, int(options.retries))
         self.log = options.log
+        self.max_new_tokens = options.max_new_tokens
         self.token = serve_token()
         self._model_id: Optional[str] = None
         self.notes: List[str] = []
@@ -542,8 +548,11 @@ class RemoteBackend:
         self, raw: bytes, filename: str, mime: str, language: Optional[str]
     ) -> Any:
         model = self._resolve_model_id()
+        fields: dict[str, Any] = {"model": model, "language": language}
+        if self.max_new_tokens is not None:
+            fields["max_completion_tokens"] = self.max_new_tokens
         body, content_type = encode_multipart(
-            {"model": model, "language": language},
+            fields,
             file_bytes=raw,
             filename=filename,
             mime=mime,
@@ -572,7 +581,12 @@ class RemoteBackend:
                 ],
             }
         )
-        payload = {"model": self._resolve_model_id(), "messages": messages}
+        payload: dict[str, Any] = {
+            "model": self._resolve_model_id(),
+            "messages": messages,
+        }
+        if self.max_new_tokens is not None:
+            payload["max_completion_tokens"] = self.max_new_tokens
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         return self._request_json(
             "POST",

@@ -35,6 +35,10 @@ MAX_SPAN_PAD = 200
 # coverage is not mistaken for full coverage.
 TAIL_START_RATIO = 0.8
 MIN_TAIL_MATCH_RATIO = 0.2
+# Below this many characters the tail slice is noise: a 4-char window "abcd"
+# against reference "abc" would look like a missing tail even though it is a
+# normal partial match. Only judge the tail when there is enough of it.
+MIN_TAIL_CHARS = 8
 
 
 @dataclass(frozen=True)
@@ -334,7 +338,9 @@ def attribute_reference(
             tail_matched = sum(
                 1 for position in range(tail_start, window_len) if position in covered
             )
-        tail_ratio = tail_matched / tail_len if tail_len > 0 else 1.0
+        tail_ratio = (
+            tail_matched / tail_len if tail_len >= MIN_TAIL_CHARS else 1.0
+        )
         start_char = offsets[ref_start_norm]
         end_char = offsets[ref_end_norm - 1] + 1
         spans.append(

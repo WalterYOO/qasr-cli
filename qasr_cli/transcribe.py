@@ -74,7 +74,7 @@ LogFn = Callable[[str], None]
 
 # Bump when chunk records gain new semantics that older caches must not mask
 # (e.g. windows recovered from their own anchor when the reference is short).
-CHUNK_LOGIC_VERSION = 2
+CHUNK_LOGIC_VERSION = 3
 
 
 def _noop(_msg: str) -> None:
@@ -1229,7 +1229,7 @@ def _long_timestamps(
         warnings.extend(
             f"chunk_anchor_fallback:{index}" for index in fallback_indexes
         )
-        warnings.append(f"canonical_reference_incomplete:{len(fallback_indexes)}")
+        warnings.append(f"chunk_anchor_fallback_count:{len(fallback_indexes)}")
 
     items: List[Any] = []
     for position, (window, span) in enumerate(zip(windows, spans)):

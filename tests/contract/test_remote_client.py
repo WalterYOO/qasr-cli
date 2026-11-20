@@ -204,6 +204,47 @@ def test_remote_transcription_multipart_and_language(capsys, wav_file, monkeypat
     assert "remote-secret" not in out.out
 
 
+def test_remote_options_token_budget_is_sent_to_server(tmp_path):
+    """vLLM only honours a completion cap it is told about (issue: bench RTF)."""
+    from types import SimpleNamespace
+
+    from qasr_cli.inputs import InputItem
+    from qasr_cli.remote import RemoteBackend, RemoteOptions
+
+    wav = write_wav(tmp_path / "budget.wav", seconds=0.2)
+    job = SimpleNamespace(
+        item=InputItem(id="budget", source=str(wav), path=wav),
+        language="Chinese",
+        context=None,
+    )
+    with fake_server() as (url, handler):
+        backend = RemoteBackend(RemoteOptions(base_url=url, max_new_tokens=1672))
+        backend.prepare()
+        backend.transcribe([job], SimpleNamespace(timestamps=False))
+    body = handler.bodies[0]
+    assert b'name="max_completion_tokens"' in body
+    assert b"\r\n1672\r\n" in body
+
+
+def test_remote_without_budget_leaves_server_default(tmp_path):
+    from types import SimpleNamespace
+
+    from qasr_cli.inputs import InputItem
+    from qasr_cli.remote import RemoteBackend, RemoteOptions
+
+    wav = write_wav(tmp_path / "default.wav", seconds=0.2)
+    job = SimpleNamespace(
+        item=InputItem(id="default", source=str(wav), path=wav),
+        language=None,
+        context=None,
+    )
+    with fake_server() as (url, handler):
+        backend = RemoteBackend(RemoteOptions(base_url=url))
+        backend.prepare()
+        backend.transcribe([job], SimpleNamespace(timestamps=False))
+    assert b"max_completion_tokens" not in handler.bodies[0]
+
+
 def test_remote_chat_context_uses_system_without_prefill(capsys, wav_file):
     with fake_server() as (url, handler):
         code, out = _run(

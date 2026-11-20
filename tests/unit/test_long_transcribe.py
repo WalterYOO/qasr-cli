@@ -18,11 +18,12 @@ from tests.conftest import write_wav
 class WindowBackend:
     name = "fake"
 
-    def __init__(self, canonical_text=None):
+    def __init__(self, canonical_text=None, anchors=None):
         self.calls = []
         self.budgets = []
         self.align_calls = []
         self.canonical_text = canonical_text
+        self.anchors = dict(anchors or {})
 
     def ensure_loaded(self, need_align=False):
         return None
@@ -35,7 +36,11 @@ class WindowBackend:
             if "#" not in job.item.id and self.canonical_text is not None:
                 text = self.canonical_text
             else:
-                text = f"片段{job.item.id.rsplit('#', 1)[-1]}"
+                suffix = job.item.id.rsplit("#", 1)[-1]
+                try:
+                    text = self.anchors.get(int(suffix), f"片段{suffix}")
+                except ValueError:
+                    text = f"片段{suffix}"
             results.append(
                 TranscribeResult(
                     text=text,
@@ -212,7 +217,7 @@ def test_long_timestamps_recover_windows_missing_from_reference(
     assert result.exit_code == EXIT_OK
     written = json.loads((out / "long.json").read_text())
     warnings = written["result"]["warnings"]
-    assert "canonical_reference_incomplete:2" in warnings
+    assert "chunk_anchor_fallback_count:2" in warnings
     assert "chunk_anchor_fallback:1" in warnings
     assert "chunk_anchor_fallback:2" in warnings
     assert written["result"]["text"] == "片段0片段1片段2"
@@ -225,8 +230,13 @@ def test_long_timestamps_recover_window_whose_reference_has_no_tail(
 ):
     """A reference covering only a window's head must not drop its ending."""
     path, info = long_audio
-    # Window 2 matches 2/3 of "片段2", so it is not weak, but its tail is gone.
-    backend = WindowBackend(canonical_text="片段0片段1片段")
+    # Window 2 matches 60% of a long anchor, so it is not weak, but the
+    # reference stops before the anchor's final 20% (the tail).
+    anchor2 = "abcdefghijklmnopqrstuvwxyz0123456789ABCD"
+    backend = WindowBackend(
+        canonical_text="片段0片段1" + anchor2[:24],
+        anchors={2: anchor2},
+    )
     monkeypatch.setattr(core, "build_transformers_backend", lambda *a, **k: backend)
     out = tmp_path / "out"
     result = core.run(
@@ -238,9 +248,10 @@ def test_long_timestamps_recover_window_whose_reference_has_no_tail(
     written = json.loads((out / "long.json").read_text())
     warnings = written["result"]["warnings"]
     assert "chunk_anchor_fallback:2" in warnings
-    assert "canonical_reference_incomplete:1" in warnings
+    assert "chunk_anchor_fallback_count:1" in warnings
     assert not any(w.startswith("chunk_reference_match_low:2") for w in warnings)
-    assert written["result"]["text"] == "片段0片段1片段2"
+    # The rebuild joins windows with a separator, so compare without spaces.
+    assert written["result"]["text"].replace(" ", "") == "片段0片段1" + anchor2
 
 
 def test_resume_reruns_when_chunk_logic_version_changes(

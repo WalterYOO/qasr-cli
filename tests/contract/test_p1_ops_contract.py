@@ -121,6 +121,39 @@ def test_bench_rejects_zero_and_out_of_range(capsys, args):
     assert code == 2, payload
 
 
+def test_bench_remote_passes_duration_scaled_token_budget(capsys, monkeypatch):
+    """Remote bench must ask the server for the same budget as local runs."""
+    import qasr_cli.remote as remote_mod
+    from qasr_cli.audio import max_new_tokens_for
+
+    seen = {}
+
+    class FakeRemote:
+        resolved_model_id = "served"
+
+        def __init__(self, options):
+            seen["options"] = options
+
+        def prepare(self):
+            return None
+
+        def transcribe(self, jobs, opts):
+            return [
+                TranscribeResult(
+                    text="x", language="English", language_source="auto", segments=[]
+                )
+                for _ in jobs
+            ]
+
+    monkeypatch.setattr(remote_mod, "RemoteBackend", FakeRemote)
+    code = main([
+        "--server", "http://127.0.0.1:18000",
+        "bench", "--json", "--duration", "400", "--iterations", "1",
+    ])
+    assert code == 0, capsys.readouterr()
+    assert seen["options"].max_new_tokens == max_new_tokens_for(400.0)
+
+
 def test_bench_remote_warning_reaches_stderr(capsys, monkeypatch):
     import qasr_cli.remote as remote_mod
 

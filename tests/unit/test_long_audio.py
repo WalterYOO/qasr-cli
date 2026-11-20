@@ -222,12 +222,22 @@ def test_attribute_reference_covers_window_spanning_two_sentences():
 
 def test_attribute_reference_flags_reference_stopping_inside_window():
     """60% overall match but no tail text is still incomplete coverage."""
-    ref = "abcdefghijkl"  # 12 chars, ends at 60% of the window
-    window = "abcdefghijklmnopqrst"
+    # The window's last 20% must be at least MIN_TAIL_CHARS for the tail check
+    # to run, so use a realistic long window rather than a handful of chars.
+    window = "abcdefghijklmnopqrstuvwxyz0123456789ABCD"
+    ref = window[:24]  # 60% of the window, ending before its tail
     span = attribute_reference(ref, [window])[0]
     assert span.match_ratio >= 0.5
     assert span.is_incomplete
     assert span.tail_match_ratio == 0.0
+
+
+def test_attribute_reference_ignores_tail_of_very_short_window():
+    """A short window's tail is noise, not evidence of a truncated reference."""
+    span = attribute_reference("abc", ["abcd"])[0]
+    assert span.match_ratio >= 0.5
+    assert span.tail_match_ratio == 1.0
+    assert not span.is_incomplete
 
 
 def test_attribute_reference_stays_on_one_diagonal():

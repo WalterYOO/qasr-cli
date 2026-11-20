@@ -142,6 +142,7 @@ def handle(ns: Any, ctx: CommandContext) -> int:
                     timeout=float(cfg.get("timeout") or 300.0),
                     retries=int(cfg.get("retries") or 2),
                     log=ctx.log,
+                    max_new_tokens=token_budget,
                 )
             )
             backend.prepare()

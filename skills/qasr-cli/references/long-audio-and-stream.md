@@ -2,7 +2,7 @@
 
 # 长音频切块与流式转写
 
-版本基线 `qasr 0.3.2`。0.3.x **没有 VAD**：不做静音检测、不按说话人切块；切块只看时间窗口。
+版本基线 `qasr 0.3.3`。0.3.x **没有 VAD**：不做静音检测、不按说话人切块；切块只看时间窗口。
 实时流式也只在 Linux + CUDA + `[vllm]` 下可用。
 
 ## transcribe 的切块阈值
@@ -25,7 +25,7 @@ qasr --json align long.wav --text-file long.txt -l zh -f srt -o out/ --dry-run \
 - 纯文本多窗口时，结果可能带 `warnings:["chunk_boundary_text_uncertain"]`：跨块文本拼接不确定。
 - 带时间戳的长音频由 ASR 产生窗口锚点，再在每个窗口内做强制对齐；可能出现
   `chunk_reference_match_low:<index>:<ratio>`、`chunk_anchor_fallback:<index>`、
-  `canonical_reference_incomplete:<count>`、`chunk_align_failed:<index>:<message>`。
+  `chunk_anchor_fallback_count:<count>`、`chunk_align_failed:<index>:<message>`。
   它们表示该窗口在全文参考里没有可靠对齐的文本：参考可能整体或局部被截断（包括
   只覆盖到窗口前部），或长音频单次 ASR 与分窗结果差异过大。`chunk_anchor_fallback`
   表示 qasr 已退回用该窗口自身的 ASR 锚点做对齐，输出通常仍完整；读
