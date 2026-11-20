@@ -2,7 +2,7 @@
 
 # transcribe / align：命令与输出契约
 
-版本基线 `qasr 0.3.1`。全局 flag（`--json`、`--backend`、`--model`、`--server`、`--dry-run` 等）
+版本基线 `qasr 0.3.2`。全局 flag（`--json`、`--backend`、`--model`、`--server`、`--dry-run` 等）
 放在 `qasr` 之后、子命令之前，或叶子命令之后；不要放在 `models`/`config` 这类中间层。
 
 ## transcribe

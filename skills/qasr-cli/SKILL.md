@@ -16,7 +16,7 @@ description: >-
 
 # qasr-cli：Qwen3-ASR 转写 / 对齐 / 字幕
 
-按 `qasr 0.3.x`（0.3.1 实测）编写。先 `qasr --version`；主/次版本不同时，以 `qasr <cmd> --help` 为准。本 skill 只处理“音频 → 文本/时间轴”；TTS、音色克隆、配音、有声书归 `qtts-cli`，翻译、说话人分离、烧字幕、视频剪辑、训练都不在 qasr 范围。
+按 `qasr 0.3.x`（0.3.2 实测）编写。先 `qasr --version`；主/次版本不同时，以 `qasr <cmd> --help` 为准。本 skill 只处理“音频 → 文本/时间轴”；TTS、音色克隆、配音、有声书归 `qtts-cli`，翻译、说话人分离、烧字幕、视频剪辑、训练都不在 qasr 范围。
 
 ## 安装与最小路径
 
