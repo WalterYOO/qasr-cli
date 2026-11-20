@@ -98,12 +98,16 @@ def test_align_coverage_disabled(capsys, wav_file, model_factory, fake_aligner):
 class FakeASR:
     language = "English"
 
+    def __init__(self):
+        self.budgets = []
+
     def ensure_loaded(self, need_align=False):
         return None
 
     def transcribe(self, jobs, opts):
         from qasr_cli.backends import TranscribeResult
 
+        self.budgets.append(opts.max_new_tokens)
         return [
             TranscribeResult(
                 text="hello world",
@@ -188,6 +192,63 @@ def test_align_accepts_181s_with_windowing(
     assert plan["count"] == 2
     starts = [item["start"] for item in payload["result"]["items"]]
     assert starts == sorted(starts)
+
+
+def test_align_window_asr_gets_duration_scaled_budget(
+    monkeypatch, capsys, tmp_path, model_factory
+):
+    """Window anchors must not run at qwen-asr's 512-token default."""
+    from qasr_cli.audio import max_new_tokens_for
+    from qasr_cli.long_audio import plan_windows
+
+    model_factory("Qwen3-ForcedAligner-0.6B")
+    model_factory("Qwen3-ASR-1.7B")
+    audio = tmp_path / "long.wav"
+    audio.write_bytes(b"RIFF")
+
+    import numpy as np
+
+    import qasr_cli.audio as audio_mod
+    from qasr_cli.audio import AudioInfo
+
+    duration_s = 181.0
+    sample_rate = 16000
+
+    def fake_info(_p):
+        return AudioInfo(
+            Path(_p), duration_s, sample_rate, 1, int(duration_s * sample_rate), "WAV"
+        )
+
+    monkeypatch.setattr(audio_mod, "probe", fake_info)
+    monkeypatch.setattr(align_core, "probe", fake_info)
+    monkeypatch.setattr(
+        align_core,
+        "read_window_16k",
+        lambda _p, start, end, **k: np.zeros(max(0, end - start), dtype="float32"),
+    )
+
+    asr = FakeASR()
+
+    def _build(path, **kwargs):
+        if "ForcedAligner" in str(path):
+            return FakeAligner(TEXT)
+        return asr
+
+    monkeypatch.setattr(align_core, "build_transformers_backend", _build)
+    code = main([
+        "align", str(audio), "--text", TEXT, "--language", "zh",
+        "--device", "cpu", "--dtype", "fp32", "--json", "--coverage-min", "0",
+    ])
+    assert code == 0, json.loads(capsys.readouterr().out)
+    expected = [
+        max_new_tokens_for(
+            (window.audio_end_sample - window.audio_start_sample) / sample_rate
+        )
+        for window in plan_windows(
+            int(duration_s * sample_rate), sample_rate, window_s=180.0
+        )
+    ]
+    assert asr.budgets == expected
 
 
 def test_align_requires_one_text_source(capsys, wav_file, model_factory):

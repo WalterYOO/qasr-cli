@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from . import SCHEMA_VERSION, long_audio
-from .audio import AudioInfo, probe, read_window_16k, write_wav_16k
+from .audio import AudioInfo, max_new_tokens_for, probe, read_window_16k, write_wav_16k
 from .backends import (
     AlignJob,
     AlignOptions,
@@ -215,7 +215,10 @@ def probe_language(
         )
         result = asr_backend.transcribe(
             [TranscribeJob(item=window_item, info=window_info)],
-            TranscribeOptions(timestamps=False),
+            TranscribeOptions(
+                timestamps=False,
+                max_new_tokens=max_new_tokens_for(window_info.duration_s),
+            ),
         )[0]
     return result.language
 
@@ -250,7 +253,13 @@ def _windowed_items(
             try:
                 anchor = asr.transcribe(
                     [TranscribeJob(item=window_item, info=window_info)],
-                    TranscribeOptions(timestamps=False),
+                    TranscribeOptions(
+                        timestamps=False,
+                        # Window anchors feed attribution; the 512-token
+                        # default would truncate 180s of speech and drop the
+                        # window's tail from alignment.
+                        max_new_tokens=max_new_tokens_for(window_info.duration_s),
+                    ),
                 )[0]
                 anchors.append(anchor.text)
                 warnings.extend(anchor.warnings)
