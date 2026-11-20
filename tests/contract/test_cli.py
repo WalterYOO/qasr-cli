@@ -32,7 +32,7 @@ def run_json(capsys, argv):
 
 def test_version(capsys):
     assert main(["--version"]) == 0
-    assert capsys.readouterr().out.strip() == "qasr 0.3.0"
+    assert capsys.readouterr().out.strip() == "qasr 0.3.1"
 
 
 def test_help(capsys):

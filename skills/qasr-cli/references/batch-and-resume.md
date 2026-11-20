@@ -2,7 +2,7 @@
 
 # 批量、manifest 与断点续跑
 
-版本基线 `qasr 0.3.0`。批量仍走 `transcribe`，不是独立命令；`align` 只接受单个音频。
+版本基线 `qasr 0.3.1`。批量仍走 `transcribe`，不是独立命令；`align` 只接受单个音频。
 
 ## 输入展开
 

@@ -2,7 +2,7 @@
 
 # 故障分流
 
-版本基线 `qasr 0.3.0`。先看退出码，再看 `--json` 的 `error.kind` / `retryable` / `details` / `hint`。
+版本基线 `qasr 0.3.1`。先看退出码，再看 `--json` 的 `error.kind` / `retryable` / `details` / `hint`。
 
 ## 退出码 → error.kind
 
